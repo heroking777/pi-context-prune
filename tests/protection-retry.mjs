@@ -2,7 +2,8 @@
 import {
   DEFAULT_CONFIG, summarizeBatch, extractProtectedItems, extractProtectedItemsDetailed,
   verifyProtectedSummary, protectionFailureKey, PROTECTION_FAILURE_MARKER,
-  protectionFailureCount, clearProtectionFailures, RATE_LIMITED_MARKER, ok,
+  protectionFailureCount, clearProtectionFailures, isProtectionPaused, protectionRejectionReason,
+  RATE_LIMITED_MARKER, ok,
 } from "./test-support.mjs";
 
 const SHA = (n) => `${String(n).padStart(3, "0")}${"a".repeat(37)}`;
@@ -16,7 +17,7 @@ const PROTECTED_BATCH = {
   ],
 };
 
-function fakeCtx(behaviour) {
+function fakeCtx(behaviour, session = "s1") {
   const calls = { n: 0 };
   const provider = {
     stream(_model, ctxArg) {
@@ -37,6 +38,7 @@ function fakeCtx(behaviour) {
     model: { provider: "fake", id: "m" },
     modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {}, env: {} }), getProvider: () => provider, find: () => undefined },
     ui: { notify: () => {} },
+    sessionManager: { getSessionId: () => session },
   } };
 }
 
@@ -140,3 +142,92 @@ ok("OFF config never creates a suppression path", await (async () => {
   const r = await summarizeBatch(PROTECTED_BATCH, cfgOff, offCtx.ctx);
   return r !== null && r.summaryText !== undefined && protectionFailureCount() === 0;
 })());
+
+// ── 7. Phase33: scan limit is fail-closed ───────────────────────────────────
+const filler = (n) => Array.from({ length: n }, () => `note ${SHA(1)}`).join("\n");
+const withTail = (n, tail) => `${filler(n)}\n${tail}`;
+for (const n of [3999, 4000]) {
+  const detailed = extractProtectedItemsDetailed(filler(n));
+  ok(`${n} matches complete the scan`, detailed.truncated === false && detailed.scanned === n);
+  ok(`${n} matches pass verification`, verifyProtectedSummary(filler(n), SHA(1)).ok === true);
+}
+for (const n of [4001, 10000]) {
+  const detailed = extractProtectedItemsDetailed(filler(n));
+  ok(`${n} matches fail closed on the scan limit`,
+    detailed.truncated === true && verifyProtectedSummary(filler(n), SHA(1)).ok === false &&
+    verifyProtectedSummary(filler(n), SHA(1)).truncated === true);
+}
+ok("truncation is distinct from missing and overflow",
+  protectionRejectionReason({ truncated: true, overflow: [], missing: [], ok: false, checked: 0, required: 0, advisoryMissing: [] }) === "incomplete" &&
+  protectionRejectionReason({ truncated: false, overflow: ["path"], missing: [], ok: false, checked: 0, required: 0, advisoryMissing: [] }) === "overflow");
+for (const [label, tail] of [
+  ["SHA", `FINAL_SHA=${SHA(7)}`],
+  ["ROLLBACK", "ROLLBACK=restore /opt/heroking/releases/jra-da015ff from snapshot"],
+  ["UNFINISHED_TASK", "UNFINISHED_TASK: resume Phase 18 tracing"],
+]) {
+  const raw = withTail(4001, tail);
+  const verdict = verifyProtectedSummary(raw, `${SHA(1)} ${tail}`);
+  ok(`an unscanned trailing ${label} cannot pass`, verdict.ok === false && verdict.truncated === true);
+}
+clearProtectionFailures();
+const truncCtx = fakeCtx("compliant", "trunc");
+// 100 tool calls x 43 single-match lines keeps each result under the 2000-char
+// serialization cap while pushing the total match count past 4000.
+const bigCalls = Array.from({ length: 100 }, (_, i) => ({
+  toolName: "bash", toolCallId: `big${i}`, args: {}, isError: false,
+  resultText: Array.from({ length: 43 }, () => `note ${SHA(1)}`).join("\n"),
+}));
+const truncResult = await summarizeBatch(batch(bigCalls), cfgOn, truncCtx.ctx);
+ok("summarize layer reports incomplete for a truncated scan",
+  truncResult !== null && truncResult[PROTECTION_FAILURE_MARKER] === true && truncResult.reason === "incomplete");
+
+// ── 8. Phase33: session isolation ───────────────────────────────────────────
+clearProtectionFailures();
+const sessionA = fakeCtx("lossy", "session-A");
+const sessionB = fakeCtx("lossy", "session-B");
+await summarizeBatch(PROTECTED_BATCH, cfgOn, sessionA.ctx);
+ok("session A failure is recorded only for session A",
+  protectionFailureCount("session-A") === 1 && protectionFailureCount("session-B") === 0);
+const aSecond = await summarizeBatch(PROTECTED_BATCH, cfgOn, sessionA.ctx);
+ok("same session, same content: no second provider call",
+  sessionA.calls.n === 1 && aSecond[PROTECTION_FAILURE_MARKER] === true);
+const bFirst = await summarizeBatch(PROTECTED_BATCH, cfgOn, sessionB.ctx);
+ok("a different session is not suppressed by A's failure",
+  sessionB.calls.n === 1 && bFirst !== null && bFirst[PROTECTION_FAILURE_MARKER] === true);
+ok("session counts stay independent", protectionFailureCount("session-A") === 1 && protectionFailureCount("session-B") === 1);
+const unknownCtx = fakeCtx("lossy");
+unknownCtx.ctx.sessionManager = undefined;
+await summarizeBatch(PROTECTED_BATCH, cfgOn, unknownCtx.ctx);
+ok("a context without a session id uses the shared safe bucket",
+  protectionFailureCount("unknown-session") === 1 && unknownCtx.calls.n === 1);
+
+// ── 9. Phase33: session pause instead of eviction ────────────────────────────
+clearProtectionFailures();
+const pauseSession = fakeCtx("lossy", "pause-session");
+const firstBatchKey = PROTECTED_BATCH;
+await summarizeBatch(firstBatchKey, cfgOn, pauseSession.ctx);
+const firstBatchCalls = pauseSession.calls.n;
+for (let i = 0; i < 300; i++) await summarizeBatch(variation(i + 5000), cfgOn, pauseSession.ctx);
+ok("the session pauses instead of evicting records",
+  protectionFailureCount("pause-session") === 256 && isProtectionPaused("pause-session") === true);
+const callsAfterPause = pauseSession.calls.n;
+const pausedResult = await summarizeBatch(variation(9999), cfgOn, pauseSession.ctx);
+ok("a paused session makes no further provider calls",
+  pauseSession.calls.n === callsAfterPause && pausedResult[PROTECTION_FAILURE_MARKER] === true && pausedResult.reason === "paused");
+await summarizeBatch(firstBatchKey, cfgOn, pauseSession.ctx);
+ok("the oldest failure is never evicted and re-sent",
+  pauseSession.calls.n === callsAfterPause && protectionFailureCount("pause-session") === 256 && firstBatchCalls === 1);
+ok("pausing one session does not pause another",
+  isProtectionPaused("session-A") === false && isProtectionPaused("pause-session") === true);
+clearProtectionFailures();
+ok("clearing resets pause for every session",
+  protectionFailureCount() === 0 && isProtectionPaused("pause-session") === false);
+
+// ── 10. Cache bound across many sessions ────────────────────────────────────
+clearProtectionFailures();
+for (let s = 0; s < 12; s++) {
+  const c = fakeCtx("lossy", `many-${s}`);
+  await summarizeBatch(PROTECTED_BATCH, cfgOn, c.ctx);
+}
+ok("the session table stays bounded", protectionFailureCount() > 0 && protectionFailureCount() <= 8 * 256);
+clearProtectionFailures();

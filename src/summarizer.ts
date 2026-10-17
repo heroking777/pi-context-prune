@@ -13,14 +13,17 @@ import { resolveModel, summarizerThinkingOptions, receivedTextChars } from "./su
 import {
   protectionFailureKey,
   verifyProtectedSummary,
-  getSuppressedProtectionFailure,
-  rememberProtectionFailure,
-  protectionFailureResult,
   protectionRejectionReason,
   protectionRejectionCategories,
   type ProtectionFailureResult,
 } from "./summary-protection.js";
-export { protectionFailureCount, clearProtectionFailures } from "./summary-protection.js";
+import {
+  resolveProtectionSessionKey,
+  getSuppressedProtectionFailure,
+  rememberProtectionFailure,
+  protectionFailureResult,
+} from "./summary-protection-store.js";
+export { protectionFailureCount, clearProtectionFailures, isProtectionPaused } from "./summary-protection-store.js";
 import type { FloorSkippedResult } from "./flush-policy.js";
 import {
   CREDIT_EXHAUSTED_MARKER,
@@ -62,11 +65,13 @@ async function summarizeBatchImpl(
   if (options.signal?.aborted) throw new Error("summarizeBatch: aborted before start");
 
   const serialized = serializeBatchForSummarizer(batch);
-  // Phase32: a batch whose compressed summary already failed protection is not
-  // re-sent on a later automatic flush while its content and policy are unchanged.
+  // Phase32/33: a batch whose compressed summary already failed in THIS session
+  // is not re-sent on a later automatic flush while its content and policy are
+  // unchanged. Other sessions are unaffected.
   const protectionKey = config.protectedSummaryCompression === true ? protectionFailureKey(serialized, config) : null;
+  const sessionKey = protectionKey !== null ? resolveProtectionSessionKey(ctx) : "";
   if (protectionKey !== null) {
-    const suppressed = getSuppressedProtectionFailure(protectionKey);
+    const suppressed = getSuppressedProtectionFailure(sessionKey, protectionKey);
     if (suppressed) return protectionFailureResult(protectionKey, suppressed);
   }
 
@@ -182,13 +187,15 @@ async function summarizeBatchImpl(
       const verdict = verifyProtectedSummary(serialized, llmText);
       if (!verdict.ok) {
         const reason = protectionRejectionReason(verdict);
-        if (protectionKey !== null) rememberProtectionFailure(protectionKey, reason);
+        const effective = protectionKey !== null
+          ? rememberProtectionFailure(sessionKey, protectionKey, reason)
+          : reason;
         const categories = protectionRejectionCategories(verdict);
         ctx.ui.notify(
-          `pruner: compressed summary rejected (${reason}${categories ? `: ${categories}` : ""}); raw tool output kept pending and not retried for this batch`,
+          `pruner: compressed summary rejected (${effective}${categories ? `: ${categories}` : ""}); raw tool output kept pending and not retried for this batch`,
           "error",
         );
-        return protectionFailureResult(protectionKey ?? "", reason, verdict.missing);
+        return protectionFailureResult(protectionKey ?? "", effective, verdict.missing);
       }
     }
 

@@ -118,7 +118,11 @@ function outcomeOf(result: unknown, threw: boolean): string {
   const value = result as Record<string, unknown>;
   if (value.__prunerFloorSkipped === true) return "skipped-size-floor";
   if (value[PROTECTION_FAILURE_MARKER] === true) {
-    return (value as { reason?: string }).reason === "overflow" ? "protection-overflow" : "protection-failed";
+    const reason = (value as { reason?: string }).reason;
+    if (reason === "overflow") return "protection-overflow";
+    if (reason === "incomplete") return "protection-incomplete";
+    if (reason === "paused") return "protection-paused";
+    return "protection-failed";
   }
   if (value[RATE_LIMITED_MARKER] === true) return "rate-limited";
   if (value[CREDIT_EXHAUSTED_MARKER] === true) return "credit-exhausted";

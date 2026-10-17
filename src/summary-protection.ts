@@ -35,13 +35,20 @@ export const PROTECTION_FAILURE_MARKER = "__prunerProtectionFailed";
 
 export interface ProtectionFailureResult {
   [PROTECTION_FAILURE_MARKER]: true;
-  /** `missing` = an enforced item was dropped; `overflow` = too many to verify. */
-  reason: "missing" | "overflow";
+  /**
+   * `missing` = an enforced item was dropped; `overflow` = too many values to
+   * verify; `incomplete` = the scan limit was hit; `paused` = this session's
+   * protected compression is paused after too many distinct failures.
+   */
+  reason: ProtectionFailureReason;
   /** Opaque retry-suppression key (no raw content). */
   key: string;
   missingCategories: ProtectedCategory[];
   missingCount: number;
 }
+
+/** All reasons a protected summary can be rejected or suppressed. */
+export type ProtectionFailureReason = "missing" | "overflow" | "incomplete" | "paused";
 
 /** Categories whose absence blocks the summary (six required + status). */
 const ENFORCED: ReadonlySet<ProtectedCategory> = new Set<ProtectedCategory>([
@@ -97,18 +104,23 @@ export function extractProtectedItemsDetailed(rawText: string): {
   items: ProtectedItem[];
   overflowCategories: ProtectedCategory[];
   scanned: number;
+  truncated: boolean;
 } {
   const seen = new Set<string>();
   const out: ProtectedItem[] = [];
   const counts = new Map<ProtectedCategory, number>();
   const overflow = new Set<ProtectedCategory>();
   let scanned = 0;
-  for (const extractor of EXTRACTORS) {
-    if (scanned >= MAX_TOTAL_MATCHES) break;
+  let truncated = false;
+  outer: for (const extractor of EXTRACTORS) {
     const regex = new RegExp(extractor.regex.source, extractor.regex.flags);
     for (const match of rawText.matchAll(regex)) {
+      if (scanned >= MAX_TOTAL_MATCHES) {
+        // There is at least one more match we refuse to scan: fail closed.
+        truncated = true;
+        break outer;
+      }
       scanned += 1;
-      if (scanned > MAX_TOTAL_MATCHES) break;
       const raw = extractor.group === undefined ? match[0] : match[extractor.group];
       if (raw === undefined || raw.length === 0) continue;
       const item = normalize({ category: extractor.category, value: raw, exact: extractor.exact ?? false, upper: extractor.upper });
@@ -124,7 +136,7 @@ export function extractProtectedItemsDetailed(rawText: string): {
       out.push(item);
     }
   }
-  return { items: out, overflowCategories: [...overflow], scanned };
+  return { items: out, overflowCategories: [...overflow], scanned, truncated };
 }
 
 /**
@@ -146,14 +158,16 @@ export interface ProtectionVerdict {
   missing: ProtectedItem[];
   advisoryMissing: ProtectedItem[];
   overflow: ProtectedCategory[];
+  /** True when the scan limit was reached before the raw text was exhausted. */
+  truncated: boolean;
 }
 
 /**
  * Verifies that enforced protected items survive into the summary. Returns
- * `ok:false` when any enforced item is missing or any enforced category
- * overflowed (so unverified items are never silently passed), letting the
- * caller reject the summary and keep the raw output on the existing restore
- * path.
+ * `ok:false` when any enforced item is missing, any enforced category
+ * overflowed, or the scan was truncated (so unverified items are never
+ * silently passed). The caller then rejects the summary and keeps the raw
+ * output on the existing restore path.
  */
 export function verifyProtectedSummary(rawText: string, summaryText: string): ProtectionVerdict {
   const extraction = extractProtectedItemsDetailed(rawText);
@@ -170,7 +184,15 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
     if (!isPresent(summaryText, item)) missing.push(item);
   }
   const overflow = extraction.overflowCategories.filter((category) => ENFORCED.has(category));
-  return { ok: missing.length === 0 && overflow.length === 0, checked: items.length, required, missing, advisoryMissing, overflow };
+  return {
+    ok: missing.length === 0 && overflow.length === 0 && !extraction.truncated,
+    checked: items.length,
+    required,
+    missing,
+    advisoryMissing,
+    overflow,
+    truncated: extraction.truncated,
+  };
 }
 
 /**
@@ -200,56 +222,16 @@ export function protectionSignature(items: ProtectedItem[]): string {
   return createHash("sha256").update(items.map((i) => `${i.category}:${i.value}`).join("|")).digest("hex").slice(0, 12);
 }
 
-// ── Phase32: retry suppression for protection failures ────────────────────
-// In-memory and bounded. Keyed on batch content + protection policy, so an
-// input or config change re-evaluates the batch. Process-scoped: after a restart
-// the batch may be attempted once more (and re-recorded), keeping raw intact
-// while avoiding unbounded automatic retries within one session.
-const MAX_PROTECTION_FAILURES = 256;
-const protectionFailures = new Map<string, "missing" | "overflow">();
+// Phase33: retry-suppression state lives in ./summary-protection-store.ts so it
+// can be scoped per session and bounded without unbounded eviction re-sends.
 
-export function protectionFailureCount(): number {
-  return protectionFailures.size;
-}
-
-export function clearProtectionFailures(): void {
-  protectionFailures.clear();
-}
-
-export function getSuppressedProtectionFailure(key: string): "missing" | "overflow" | undefined {
-  return protectionFailures.get(key);
-}
-
-export function rememberProtectionFailure(key: string, reason: "missing" | "overflow"): void {
-  if (protectionFailures.has(key)) protectionFailures.delete(key);
-  protectionFailures.set(key, reason);
-  while (protectionFailures.size > MAX_PROTECTION_FAILURES) {
-    const oldest = protectionFailures.keys().next().value;
-    if (oldest === undefined) break;
-    protectionFailures.delete(oldest);
-  }
-}
-
-/** Reason a verdict rejects the summary: overflow dominates missing items. */
-export function protectionRejectionReason(verdict: ProtectionVerdict): "missing" | "overflow" {
+/** Reason a verdict rejects the summary: an incomplete scan and overflow dominate missing items. */
+export function protectionRejectionReason(verdict: ProtectionVerdict): "missing" | "overflow" | "incomplete" {
+  if (verdict.truncated) return "incomplete";
   return verdict.overflow.length > 0 ? "overflow" : "missing";
 }
 
 /** Category names for the rejection notice (never raw values). */
 export function protectionRejectionCategories(verdict: ProtectionVerdict): string {
   return [...new Set([...verdict.missing.map((item) => item.category), ...verdict.overflow])].join(", ");
-}
-
-export function protectionFailureResult(
-  key: string,
-  reason: "missing" | "overflow",
-  missing: ProtectedItem[] = [],
-): ProtectionFailureResult {
-  return {
-    [PROTECTION_FAILURE_MARKER]: true,
-    reason,
-    key,
-    missingCategories: [...new Set(missing.map((item) => item.category))] as ProtectionFailureResult["missingCategories"],
-    missingCount: missing.length,
-  };
 }

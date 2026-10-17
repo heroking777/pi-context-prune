@@ -10,6 +10,7 @@ export {
   summarizeBatches,
   protectionFailureCount,
   clearProtectionFailures,
+  isProtectionPaused,
   summarizerThinkingOptions,
   resolveModel,
   type SummarizeOutcome,
@@ -29,6 +30,7 @@ export {
   verifyProtectedSummary,
   protectionSignature,
   protectionFailureKey,
+  protectionRejectionReason,
   PROTECTION_FAILURE_MARKER,
 } from "./src/summary-protection.js";
 export { loadConfig, saveConfig, normalizeConfig, SETTINGS_PATH } from "./src/config.js";
