@@ -11,6 +11,8 @@ export {
   protectionFailureCount,
   clearProtectionFailures,
   isProtectionPaused,
+  isProtectionAtCapacity,
+  protectionSessionCount,
   summarizerThinkingOptions,
   resolveModel,
   type SummarizeOutcome,

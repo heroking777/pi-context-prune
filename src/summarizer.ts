@@ -23,7 +23,7 @@ import {
   rememberProtectionFailure,
   protectionFailureResult,
 } from "./summary-protection-store.js";
-export { protectionFailureCount, clearProtectionFailures, isProtectionPaused } from "./summary-protection-store.js";
+export { protectionFailureCount, clearProtectionFailures, isProtectionPaused, isProtectionAtCapacity, protectionSessionCount } from "./summary-protection-store.js";
 import type { FloorSkippedResult } from "./flush-policy.js";
 import {
   CREDIT_EXHAUSTED_MARKER,
@@ -69,9 +69,11 @@ async function summarizeBatchImpl(
   // is not re-sent on a later automatic flush while its content and policy are
   // unchanged. Other sessions are unaffected.
   const protectionKey = config.protectedSummaryCompression === true ? protectionFailureKey(serialized, config) : null;
-  const sessionKey = protectionKey !== null ? resolveProtectionSessionKey(ctx) : "";
+  const session = protectionKey !== null ? resolveProtectionSessionKey(ctx) : null;
   if (protectionKey !== null) {
-    const suppressed = getSuppressedProtectionFailure(sessionKey, protectionKey);
+    // No safe session id: fail closed rather than share state across sessions.
+    if (session?.status !== "ok") return protectionFailureResult(protectionKey, "unidentified");
+    const suppressed = getSuppressedProtectionFailure(session.key, protectionKey);
     if (suppressed) return protectionFailureResult(protectionKey, suppressed);
   }
 
@@ -187,9 +189,11 @@ async function summarizeBatchImpl(
       const verdict = verifyProtectedSummary(serialized, llmText);
       if (!verdict.ok) {
         const reason = protectionRejectionReason(verdict);
-        const effective = protectionKey !== null
-          ? rememberProtectionFailure(sessionKey, protectionKey, reason)
-          : reason;
+        const effective = protectionKey === null
+          ? reason
+          : session?.status === "ok"
+            ? rememberProtectionFailure(session.key, protectionKey, reason)
+            : "unidentified";
         const categories = protectionRejectionCategories(verdict);
         ctx.ui.notify(
           `pruner: compressed summary rejected (${effective}${categories ? `: ${categories}` : ""}); raw tool output kept pending and not retried for this batch`,

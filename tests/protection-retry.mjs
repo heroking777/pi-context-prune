@@ -3,6 +3,7 @@ import {
   DEFAULT_CONFIG, summarizeBatch, extractProtectedItems, extractProtectedItemsDetailed,
   verifyProtectedSummary, protectionFailureKey, PROTECTION_FAILURE_MARKER,
   protectionFailureCount, clearProtectionFailures, isProtectionPaused, protectionRejectionReason,
+  isProtectionAtCapacity, protectionSessionCount,
   RATE_LIMITED_MARKER, ok,
 } from "./test-support.mjs";
 
@@ -181,7 +182,7 @@ const truncResult = await summarizeBatch(batch(bigCalls), cfgOn, truncCtx.ctx);
 ok("summarize layer reports incomplete for a truncated scan",
   truncResult !== null && truncResult[PROTECTION_FAILURE_MARKER] === true && truncResult.reason === "incomplete");
 
-// ── 8. Phase33: session isolation ───────────────────────────────────────────
+// ── 8. Phase33/34: session isolation ───────────────────────────────────────
 clearProtectionFailures();
 const sessionA = fakeCtx("lossy", "session-A");
 const sessionB = fakeCtx("lossy", "session-B");
@@ -195,17 +196,35 @@ const bFirst = await summarizeBatch(PROTECTED_BATCH, cfgOn, sessionB.ctx);
 ok("a different session is not suppressed by A's failure",
   sessionB.calls.n === 1 && bFirst !== null && bFirst[PROTECTION_FAILURE_MARKER] === true);
 ok("session counts stay independent", protectionFailureCount("session-A") === 1 && protectionFailureCount("session-B") === 1);
-const unknownCtx = fakeCtx("lossy");
-unknownCtx.ctx.sessionManager = undefined;
-await summarizeBatch(PROTECTED_BATCH, cfgOn, unknownCtx.ctx);
-ok("a context without a session id uses the shared safe bucket",
-  protectionFailureCount("unknown-session") === 1 && unknownCtx.calls.n === 1);
+
+// ── 8b. Phase34: unavailable session id fails closed without sharing ────────
+for (const [label, manager] of [
+  ["missing manager", undefined],
+  ["missing accessor", {}],
+  ["empty id", { getSessionId: () => "" }],
+  ["whitespace id", { getSessionId: () => "   " }],
+  ["non-string id", { getSessionId: () => 42 }],
+  ["throwing accessor", { getSessionId: () => { throw new Error("no id"); } }],
+]) {
+  clearProtectionFailures();
+  const c = fakeCtx("lossy");
+  c.ctx.sessionManager = manager;
+  const r = await summarizeBatch(PROTECTED_BATCH, cfgOn, c.ctx);
+  ok(`unidentified session (${label}) fails closed with zero provider calls`,
+    c.calls.n === 0 && r !== null && r[PROTECTION_FAILURE_MARKER] === true && r.reason === "unidentified" && protectionFailureCount() === 0);
+}
+clearProtectionFailures();
+const idA = fakeCtx("lossy"); idA.ctx.sessionManager = { getSessionId: () => { throw new Error("x"); } };
+const idB = fakeCtx("lossy"); idB.ctx.sessionManager = { getSessionId: () => { throw new Error("x"); } };
+await summarizeBatch(PROTECTED_BATCH, cfgOn, idA.ctx);
+await summarizeBatch(PROTECTED_BATCH, cfgOn, idB.ctx);
+ok("unidentified sessions never share suppression state",
+  idA.calls.n === 0 && idB.calls.n === 0 && protectionFailureCount() === 0);
 
 // ── 9. Phase33: session pause instead of eviction ────────────────────────────
 clearProtectionFailures();
 const pauseSession = fakeCtx("lossy", "pause-session");
-const firstBatchKey = PROTECTED_BATCH;
-await summarizeBatch(firstBatchKey, cfgOn, pauseSession.ctx);
+await summarizeBatch(PROTECTED_BATCH, cfgOn, pauseSession.ctx);
 const firstBatchCalls = pauseSession.calls.n;
 for (let i = 0; i < 300; i++) await summarizeBatch(variation(i + 5000), cfgOn, pauseSession.ctx);
 ok("the session pauses instead of evicting records",
@@ -214,7 +233,7 @@ const callsAfterPause = pauseSession.calls.n;
 const pausedResult = await summarizeBatch(variation(9999), cfgOn, pauseSession.ctx);
 ok("a paused session makes no further provider calls",
   pauseSession.calls.n === callsAfterPause && pausedResult[PROTECTION_FAILURE_MARKER] === true && pausedResult.reason === "paused");
-await summarizeBatch(firstBatchKey, cfgOn, pauseSession.ctx);
+await summarizeBatch(PROTECTED_BATCH, cfgOn, pauseSession.ctx);
 ok("the oldest failure is never evicted and re-sent",
   pauseSession.calls.n === callsAfterPause && protectionFailureCount("pause-session") === 256 && firstBatchCalls === 1);
 ok("pausing one session does not pause another",
@@ -223,11 +242,33 @@ clearProtectionFailures();
 ok("clearing resets pause for every session",
   protectionFailureCount() === 0 && isProtectionPaused("pause-session") === false);
 
-// ── 10. Cache bound across many sessions ────────────────────────────────────
+// ── 10. Phase34 mandatory regression: 9th session must not re-send session 1 ─
 clearProtectionFailures();
-for (let s = 0; s < 12; s++) {
-  const c = fakeCtx("lossy", `many-${s}`);
+const tracked = [];
+for (let i = 0; i < 8; i++) {
+  const c = fakeCtx("lossy", `cap-${i}`);
+  tracked.push(c);
   await summarizeBatch(PROTECTED_BATCH, cfgOn, c.ctx);
 }
-ok("the session table stays bounded", protectionFailureCount() > 0 && protectionFailureCount() <= 8 * 256);
+ok("eight sessions are tracked without eviction",
+  protectionSessionCount() === 8 && isProtectionAtCapacity() === true && protectionFailureCount() === 8);
+const callsBeforeReturn = tracked[0].calls.n;
+const returnResult = await summarizeBatch(PROTECTED_BATCH, cfgOn, tracked[0].ctx);
+ok("returning to the first session does not re-send its failed batch",
+  tracked[0].calls.n === callsBeforeReturn && returnResult[PROTECTION_FAILURE_MARKER] === true && returnResult.reason === "missing");
+const ninth = fakeCtx("lossy", "cap-9");
+const tenth = fakeCtx("lossy", "cap-10");
+const ninthResult = await summarizeBatch(PROTECTED_BATCH, cfgOn, ninth.ctx);
+const tenthResult = await summarizeBatch(PROTECTED_BATCH, cfgOn, tenth.ctx);
+ok("the ninth session fails closed with zero provider calls",
+  ninth.calls.n === 0 && ninthResult[PROTECTION_FAILURE_MARKER] === true && ninthResult.reason === "capacity");
+ok("the tenth session fails closed with zero provider calls",
+  tenth.calls.n === 0 && tenthResult.reason === "capacity" && protectionSessionCount() === 8);
+ok("capacity sessions never grow the table", protectionFailureCount() === 8);
+const callsAfterCapacity = tracked.reduce((sum, c) => sum + c.calls.n, 0);
+await summarizeBatch(variation(12345), cfgOn, tracked[3].ctx);
+await summarizeBatch(PROTECTED_BATCH, cfgOn, tracked[7].ctx);
+ok("tracked sessions keep working after capacity is reached",
+  tracked[3].calls.n + tracked[7].calls.n > 0 && tracked.reduce((sum, c) => sum + c.calls.n, 0) >= callsAfterCapacity);
 clearProtectionFailures();
+ok("clearing releases capacity", isProtectionAtCapacity() === false && protectionSessionCount() === 0);

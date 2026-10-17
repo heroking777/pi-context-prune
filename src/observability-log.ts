@@ -122,6 +122,8 @@ function outcomeOf(result: unknown, threw: boolean): string {
     if (reason === "overflow") return "protection-overflow";
     if (reason === "incomplete") return "protection-incomplete";
     if (reason === "paused") return "protection-paused";
+    if (reason === "capacity") return "protection-capacity";
+    if (reason === "unidentified") return "protection-unidentified";
     return "protection-failed";
   }
   if (value[RATE_LIMITED_MARKER] === true) return "rate-limited";

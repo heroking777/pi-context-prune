@@ -1,17 +1,15 @@
-// Phase33: session-scoped, bounded retry suppression for protection failures.
+// Phase34: session-scoped, bounded retry suppression for protection failures.
 //
-// Goals:
-//  - one session's failures never suppress another session's batches
-//  - a batch whose compressed summary already failed is not re-sent while its
-//    content and policy are unchanged
-//  - when a session accumulates too many distinct failures we PAUSE protected
-//    compression for that session instead of evicting records (eviction would
-//    silently re-send an already-failed batch)
+// Safety rules:
+//  - failure state is never evicted; when the session table is full, a NEW
+//    session fails closed (protected compression is refused without a provider
+//    call) instead of dropping an existing session's state
+//  - an unavailable/empty/throwing session id is NOT shared between sessions: it
+//    fails closed as `unidentified`
+//  - an unchanged batch in a tracked session is never re-sent
 //
-// State is in-memory and process-scoped. A restart starts with an empty store
-// (a batch may be attempted once more and re-recorded); session files and raw
-// tool output are never touched. Recovery: restart the process, change the
-// summarizer config (new batch keys), or an explicit programmatic reset.
+// State is in-memory and process-scoped: a restart starts empty and a batch may
+// be attempted once more, re-recorded, with raw tool output never touched.
 import {
   PROTECTION_FAILURE_MARKER,
   type ProtectedItem,
@@ -21,7 +19,6 @@ import {
 
 const MAX_FAILURES_PER_SESSION = 256;
 const MAX_TRACKED_SESSIONS = 8;
-const UNKNOWN_SESSION = "unknown-session";
 
 interface SessionState {
   failures: Map<string, ProtectionFailureReason>;
@@ -30,59 +27,70 @@ interface SessionState {
 
 const sessions = new Map<string, SessionState>();
 
-function touch(sessionKey: string): SessionState {
-  const existing = sessions.get(sessionKey);
-  if (existing) {
-    sessions.delete(sessionKey);
-    sessions.set(sessionKey, existing);
-    return existing;
+/** Exact resolution of the session key; `unidentified` fails closed. */
+export type ProtectionSessionResolution = { status: "ok"; key: string } | { status: "unidentified" };
+
+/**
+ * Resolves a session key from the extension context. A missing id, an empty or
+ * whitespace id, a non-string id, or a throwing accessor all yield
+ * `unidentified`, so unrelated sessions never share suppression state.
+ */
+export function resolveProtectionSessionKey(ctx: unknown): ProtectionSessionResolution {
+  try {
+    const manager = (ctx as {
+      sessionManager?: { getSessionId?: () => unknown; sessionId?: unknown };
+    } | undefined)?.sessionManager;
+    const raw = typeof manager?.getSessionId === "function" ? manager.getSessionId() : manager?.sessionId;
+    if (typeof raw === "string" && raw.trim().length > 0) return { status: "ok", key: raw };
+  } catch {
+    // Fail closed below.
   }
-  const created: SessionState = { failures: new Map(), paused: false };
-  sessions.set(sessionKey, created);
-  while (sessions.size > MAX_TRACKED_SESSIONS) {
-    const oldest = sessions.keys().next().value;
-    if (oldest === undefined) break;
-    sessions.delete(oldest);
-  }
-  return created;
+  return { status: "unidentified" };
 }
 
 /**
- * Resolves a stable session key from the extension context. When no session id
- * is available the shared "unknown-session" bucket is used, which is the safe
- * choice (suppression still prevents re-sends) at the cost of sharing state
- * between sessions that both lack an id.
+ * Returns the reason this batch is suppressed, or undefined when it may be sent.
+ * An untracked session over capacity fails closed so no provider call is made.
  */
-export function resolveProtectionSessionKey(ctx: unknown): string {
-  const manager = (ctx as { sessionManager?: { getSessionId?: () => unknown; sessionId?: unknown } } | undefined)?.sessionManager;
-  const id = typeof manager?.getSessionId === "function" ? manager.getSessionId() : manager?.sessionId;
-  return typeof id === "string" && id.length > 0 ? id : UNKNOWN_SESSION;
-}
-
-/** Returns the reason this batch is suppressed, or undefined when it is not. */
 export function getSuppressedProtectionFailure(sessionKey: string, batchKey: string): ProtectionFailureReason | undefined {
   const state = sessions.get(sessionKey);
-  if (!state) return undefined;
-  touch(sessionKey);
-  if (state.paused) return "paused";
-  return state.failures.get(batchKey);
+  if (state) {
+    if (state.paused) return "paused";
+    return state.failures.get(batchKey);
+  }
+  return sessions.size >= MAX_TRACKED_SESSIONS ? "capacity" : undefined;
 }
 
 export function isProtectionPaused(sessionKey: string): boolean {
   return sessions.get(sessionKey)?.paused === true;
 }
 
+/** True when the tracked-session table is full and new sessions fail closed. */
+export function isProtectionAtCapacity(): boolean {
+  return sessions.size >= MAX_TRACKED_SESSIONS;
+}
+
+export function protectionSessionCount(): number {
+  return sessions.size;
+}
+
 /**
- * Records a failure. When the session already holds MAX_FAILURES_PER_SESSION
- * distinct failures, the session is paused and the reason `paused` is returned
- * (nothing is evicted, so no suppressed batch can be re-sent).
+ * Records a failure without evicting any existing session. When the session
+ * table is full a new session returns `capacity`; when a session reaches
+ * MAX_FAILURES_PER_SESSION it is paused (further protected summaries are refused
+ * without provider calls).
  */
 export function rememberProtectionFailure(
   sessionKey: string,
   batchKey: string,
-  reason: Exclude<ProtectionFailureReason, "paused">,
+  reason: Exclude<ProtectionFailureReason, "paused" | "capacity" | "unidentified">,
 ): ProtectionFailureReason {
-  const state = touch(sessionKey);
+  let state = sessions.get(sessionKey);
+  if (!state) {
+    if (sessions.size >= MAX_TRACKED_SESSIONS) return "capacity";
+    state = { failures: new Map(), paused: false };
+    sessions.set(sessionKey, state);
+  }
   if (state.paused) return "paused";
   if (!state.failures.has(batchKey) && state.failures.size >= MAX_FAILURES_PER_SESSION) {
     state.paused = true;
@@ -100,7 +108,7 @@ export function protectionFailureCount(sessionKey?: string): number {
   return total;
 }
 
-/** Clears suppression for every session. */
+/** Clears suppression for every session (the only reset path; no production command). */
 export function clearProtectionFailures(): void {
   sessions.clear();
 }

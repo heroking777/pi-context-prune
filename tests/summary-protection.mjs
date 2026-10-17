@@ -105,6 +105,7 @@ function compressionCtx(style) {
       getProvider: () => provider, find: () => undefined,
     },
     ui: { notify: () => {} },
+    sessionManager: { getSessionId: () => "ab-session" },
   } };
 }
 function mkBatch(toolCalls) { return { turnIndex: 1, timestamp: 1, toolCalls }; }

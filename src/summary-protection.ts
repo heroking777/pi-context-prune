@@ -38,7 +38,9 @@ export interface ProtectionFailureResult {
   /**
    * `missing` = an enforced item was dropped; `overflow` = too many values to
    * verify; `incomplete` = the scan limit was hit; `paused` = this session's
-   * protected compression is paused after too many distinct failures.
+   * protected compression is paused after too many distinct failures;
+   * `capacity` = the session table is full and this new session fails closed;
+   * `unidentified` = no safe session id, so state must not be shared.
    */
   reason: ProtectionFailureReason;
   /** Opaque retry-suppression key (no raw content). */
@@ -48,7 +50,13 @@ export interface ProtectionFailureResult {
 }
 
 /** All reasons a protected summary can be rejected or suppressed. */
-export type ProtectionFailureReason = "missing" | "overflow" | "incomplete" | "paused";
+export type ProtectionFailureReason =
+  | "missing"
+  | "overflow"
+  | "incomplete"
+  | "paused"
+  | "capacity"
+  | "unidentified";
 
 /** Categories whose absence blocks the summary (six required + status). */
 const ENFORCED: ReadonlySet<ProtectedCategory> = new Set<ProtectedCategory>([
