@@ -10,6 +10,7 @@ import type {
 } from "./types.js";
 import { serializeBatchForSummarizer } from "./batch-capture.js";
 import { summarizerSystemPrompt } from "./summarizer-prompts.js";
+import { verifyProtectedSummary } from "./summary-protection.js";
 import type { FloorSkippedResult } from "./flush-policy.js";
 import {
   CREDIT_EXHAUSTED_MARKER,
@@ -198,6 +199,21 @@ async function summarizeBatchImpl(
       .filter((c: any) => c.type === "text")
       .map((c: any) => c.text)
       .join("\n");
+
+    // Phase31: when protected compression is enabled, a summary that dropped an
+    // enforced protected item is rejected. Returning null routes the batch
+    // through the existing restore path, so raw output is never lost.
+    if (config.protectedSummaryCompression === true) {
+      const verdict = verifyProtectedSummary(serialized, llmText);
+      if (!verdict.ok) {
+        const categories = [...new Set(verdict.missing.map((item) => item.category))].join(", ");
+        ctx.ui.notify(
+          `pruner: compressed summary rejected - ${verdict.missing.length} protected item(s) missing (${categories}); raw tool output kept pending`,
+          "error",
+        );
+        return null;
+      }
+    }
 
     return {
       summaryText: llmText,

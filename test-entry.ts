@@ -16,10 +16,17 @@ export {
   SYSTEM_PROMPT,
   SYSTEM_PROMPT_CONCISE,
   SYSTEM_PROMPT_FAITHFUL,
+  SYSTEM_PROMPT_PROTECTED_COMPRESSED,
+  PROTECTED_SUMMARY_DEFAULT_TARGET_CHARS,
   summarizerSystemPrompt,
   summarizerPromptMode,
 } from "./src/summarizer-prompts.js";
-export { loadConfig, saveConfig, SETTINGS_PATH } from "./src/config.js";
+export {
+  extractProtectedItems,
+  verifyProtectedSummary,
+  protectionSignature,
+} from "./src/summary-protection.js";
+export { loadConfig, saveConfig, normalizeConfig, SETTINGS_PATH } from "./src/config.js";
 export {
   DEFAULT_CONFIG,
   CUSTOM_TYPE_SUMMARY,

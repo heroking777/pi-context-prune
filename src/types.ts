@@ -223,9 +223,16 @@ export interface ContextPruneConfig {
   evidenceAppendix: boolean;
   /** Maximum appendix rows emitted across both extraction rules. */
   evidenceAppendixMaxEntries: number;
+  // ── Phase31: opt-in protected summary compression ──────────────────────
+  /** false (default) keeps the existing prompt mode untouched. When true the
+   * protected-compression prompt is used and a summary that drops an enforced
+   * protected item is rejected so the raw output stays on the restore path. */
+  protectedSummaryCompression: boolean;
+  /** Soft character target for the compressed summary body. */
+  protectedSummaryTargetChars: number;
 }
 
-export type SummarizerPromptMode = "default" | "concise" | "faithful";
+export type SummarizerPromptMode = "default" | "concise" | "faithful" | "protected";
 
 export const DEFAULT_CONFIG: ContextPruneConfig = {
   enabled: false,
@@ -252,6 +259,9 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   // Phase4/Phase5 (OPT-029/030): appendix off by default.
   evidenceAppendix: false,
   evidenceAppendixMaxEntries: 200,
+  // Phase31: protected compression off by default; 3900-char soft target.
+  protectedSummaryCompression: false,
+  protectedSummaryTargetChars: 3900,
 };
 
 // ── Captured batch ─────────────────────────────────────────────────────────

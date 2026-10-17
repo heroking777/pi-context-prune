@@ -19,8 +19,18 @@ function isSummarizerThinking(value: unknown): value is SummarizerThinking {
 export async function loadConfig(): Promise<ContextPruneConfig> {
   try {
     const raw = await readFile(SETTINGS_PATH, "utf-8");
-    const existing = JSON.parse(raw);
-    const merged = { ...DEFAULT_CONFIG, ...existing };
+    return normalizeConfig(JSON.parse(raw));
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+
+/**
+ * Validates and normalizes a raw settings object against the defaults. Exported
+ * so the validation rules can be tested without touching the settings file.
+ */
+export function normalizeConfig(existing: unknown): ContextPruneConfig {
+  const merged = { ...DEFAULT_CONFIG, ...(existing && typeof existing === "object" ? existing : {}) };
     return {
       ...merged,
       enabled: typeof merged.enabled === "boolean" ? merged.enabled : DEFAULT_CONFIG.enabled,
@@ -79,10 +89,13 @@ export async function loadConfig(): Promise<ContextPruneConfig> {
         Number.isInteger(merged.evidenceAppendixMaxEntries) && (merged.evidenceAppendixMaxEntries as number) > 0
           ? (merged.evidenceAppendixMaxEntries as number)
           : 200,
+      // Phase31: opt-in protected summary compression.
+      protectedSummaryCompression: merged.protectedSummaryCompression === true,
+      protectedSummaryTargetChars:
+        Number.isInteger(merged.protectedSummaryTargetChars) && (merged.protectedSummaryTargetChars as number) >= 500
+          ? Math.min(merged.protectedSummaryTargetChars as number, 20000)
+          : DEFAULT_CONFIG.protectedSummaryTargetChars,
     };
-  } catch {
-    return { ...DEFAULT_CONFIG };
-  }
 }
 
 /** Writes the full config to ~/.pi/agent/context-prune/settings.json. */

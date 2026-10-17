@@ -3,8 +3,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 const here = dirname(fileURLToPath(import.meta.url));
 const api = await import(join(here, ".test-work", "testable.mjs"));
-export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizeBatch, loadConfig,
+export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizerPromptMode, summarizeBatch, loadConfig, normalizeConfig,
   DEFAULT_CONFIG, SYSTEM_PROMPT, SYSTEM_PROMPT_CONCISE, SYSTEM_PROMPT_FAITHFUL,
+  SYSTEM_PROMPT_PROTECTED_COMPRESSED, PROTECTED_SUMMARY_DEFAULT_TARGET_CHARS,
+  extractProtectedItems, verifyProtectedSummary, protectionSignature,
   formatEvidenceAppendix: _fmt, extractEvidenceAppendix: _ext, safeToolCallText: _safe,
   MetadataObserver, measureSummary, withFlushObservation, withPendingBatchMetrics,
   instrumentExtensionAPI, recordBatchOutcome, recordFlushCommit, runWithFlushReason,

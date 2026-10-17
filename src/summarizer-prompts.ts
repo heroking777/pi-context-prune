@@ -57,13 +57,36 @@ Also always state briefly, in addition to the above:
 
 Do not list identifiers that are not needed for the next steps.`;
 
-export type SummarizerPromptMode = "default" | "concise" | "faithful";
+// Phase 31 (protected compression): opt-in policy. The target length is a goal,
+// not a hard cap: protected information always wins over the target. Mechanical
+// truncation is explicitly forbidden and never performed.
+export const SYSTEM_PROMPT_PROTECTED_COMPRESSED = `You are compressing a batch of tool calls into a dense summary the assistant will re-read many times.
 
-/**
- * `summarizerPromptMode` wins; `conciseSummaryMode` is kept for backwards
- * compatibility with the Phase2 setting.
- */
+Compression rules:
+- Merge duplicate or repeated success logs into one line; never restate an identical successful command.
+- Group consecutive operations on the SAME target (file, path, module, service) into one entry.
+- Drop meaningless output, progress noise, banners and redundant explanations.
+- Keep the cause-and-effect of state transitions: what changed, what is now true.
+- Keep failure -> fix -> re-verification outcomes together, naming the symptom and the fix.
+- Keep before/after differences for edits.
+- Keep next actions explicit, including anything unresolved or in progress.
+
+ALWAYS copy verbatim (never paraphrase, shorten or round):
+- commit SHAs, build IDs and revision strings
+- file paths
+- error identifiers, error strings and non-zero exit codes
+- status words such as PASS / FAIL / HOLD / UNKNOWN / BLOCKED
+- decisions, unfinished tasks and rollback/restore instructions
+
+Prefer short bullets. Omit anything that is not needed to keep working; the raw tool output stays retrievable from the pruner index when more detail is required.`;
+
+export type SummarizerPromptMode = "default" | "concise" | "faithful" | "protected";
+
+/** Default target when protected compression is enabled but no target is set. */
+export const PROTECTED_SUMMARY_DEFAULT_TARGET_CHARS = 3900;
+
 export function summarizerPromptMode(config?: Partial<ContextPruneConfig> | null): SummarizerPromptMode {
+  if (config?.protectedSummaryCompression === true) return "protected";
   if (config && (config.summarizerPromptMode === "concise" || config.summarizerPromptMode === "faithful")) {
     return config.summarizerPromptMode;
   }
@@ -72,7 +95,23 @@ export function summarizerPromptMode(config?: Partial<ContextPruneConfig> | null
 
 export function summarizerSystemPrompt(config?: Partial<ContextPruneConfig> | null): string {
   const mode = summarizerPromptMode(config);
+  if (mode === "protected") return protectedCompressionPrompt(config);
   if (mode === "concise") return SYSTEM_PROMPT_CONCISE;
   if (mode === "faithful") return SYSTEM_PROMPT_FAITHFUL;
   return SYSTEM_PROMPT;
+}
+
+function protectedTargetChars(config?: Partial<ContextPruneConfig> | null): number {
+  const value = config?.protectedSummaryTargetChars;
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : PROTECTED_SUMMARY_DEFAULT_TARGET_CHARS;
+}
+
+function protectedCompressionPrompt(config?: Partial<ContextPruneConfig> | null): string {
+  return (
+    SYSTEM_PROMPT_PROTECTED_COMPRESSED +
+    `\n\nAim for about ${protectedTargetChars(config)} characters. This is a soft target: if important protected information needs more room, exceed it. ` +
+    "Never cut off or summarise away protected information to hit the target."
+  );
 }
