@@ -19,11 +19,13 @@ import {
 } from "./summary-protection.js";
 import {
   resolveProtectionSessionKey,
-  getSuppressedProtectionFailure,
   rememberProtectionFailure,
   protectionFailureResult,
+  beginProtectedAttempt,
+  finishProtectedAttempt,
+  type ProtectionAttempt,
 } from "./summary-protection-store.js";
-export { protectionFailureCount, clearProtectionFailures, isProtectionPaused, isProtectionAtCapacity, protectionSessionCount } from "./summary-protection-store.js";
+export { protectionFailureCount, clearProtectionFailures, isProtectionPaused, isProtectionAtCapacity, protectionSessionCount, protectionSlotCount } from "./summary-protection-store.js";
 import type { FloorSkippedResult } from "./flush-policy.js";
 import {
   CREDIT_EXHAUSTED_MARKER,
@@ -70,11 +72,15 @@ async function summarizeBatchImpl(
   // unchanged. Other sessions are unaffected.
   const protectionKey = config.protectedSummaryCompression === true ? protectionFailureKey(serialized, config) : null;
   const session = protectionKey !== null ? resolveProtectionSessionKey(ctx) : null;
+  // Phase35: reserve the session slot and same-batch lock BEFORE any provider
+  // call; both are released in `finally`, so 429/abort/errors cannot leak them.
+  let attempt: ProtectionAttempt | null = null;
   if (protectionKey !== null) {
     // No safe session id: fail closed rather than share state across sessions.
     if (session?.status !== "ok") return protectionFailureResult(protectionKey, "unidentified");
-    const suppressed = getSuppressedProtectionFailure(session.key, protectionKey);
-    if (suppressed) return protectionFailureResult(protectionKey, suppressed);
+    const admission = beginProtectedAttempt(session.key, protectionKey);
+    if (admission.status === "blocked") return protectionFailureResult(protectionKey, admission.reason);
+    attempt = admission.attempt;
   }
 
   try {
@@ -229,6 +235,8 @@ async function summarizeBatchImpl(
       "error"
     );
     return null;
+  } finally {
+    if (attempt !== null) finishProtectedAttempt(attempt);
   }
 }
 

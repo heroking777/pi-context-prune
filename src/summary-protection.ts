@@ -40,7 +40,8 @@ export interface ProtectionFailureResult {
    * verify; `incomplete` = the scan limit was hit; `paused` = this session's
    * protected compression is paused after too many distinct failures;
    * `capacity` = the session table is full and this new session fails closed;
-   * `unidentified` = no safe session id, so state must not be shared.
+   * `unidentified` = no safe session id, so state must not be shared;
+   * `in-flight` = an identical batch is already being summarized.
    */
   reason: ProtectionFailureReason;
   /** Opaque retry-suppression key (no raw content). */
@@ -56,7 +57,8 @@ export type ProtectionFailureReason =
   | "incomplete"
   | "paused"
   | "capacity"
-  | "unidentified";
+  | "unidentified"
+  | "in-flight";
 
 /** Categories whose absence blocks the summary (six required + status). */
 const ENFORCED: ReadonlySet<ProtectedCategory> = new Set<ProtectedCategory>([

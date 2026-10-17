@@ -124,6 +124,7 @@ function outcomeOf(result: unknown, threw: boolean): string {
     if (reason === "paused") return "protection-paused";
     if (reason === "capacity") return "protection-capacity";
     if (reason === "unidentified") return "protection-unidentified";
+    if (reason === "in-flight") return "protection-inflight";
     return "protection-failed";
   }
   if (value[RATE_LIMITED_MARKER] === true) return "rate-limited";

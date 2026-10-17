@@ -1,15 +1,16 @@
-// Phase34: session-scoped, bounded retry suppression for protection failures.
+// Phase35: session-scoped admission + retry suppression for protected summaries.
 //
 // Safety rules:
-//  - failure state is never evicted; when the session table is full, a NEW
-//    session fails closed (protected compression is refused without a provider
-//    call) instead of dropping an existing session's state
-//  - an unavailable/empty/throwing session id is NOT shared between sessions: it
-//    fails closed as `unidentified`
-//  - an unchanged batch in a tracked session is never re-sent
+//  - at most MAX_TRACKED_SESSIONS sessions hold a slot; a protected attempt for a
+//    new session reserves a slot BEFORE any provider call, so concurrent first
+//    attempts cannot exceed the limit
+//  - slots for successful attempts are released; slots for protection failures are
+//    converted into persistent failure state (never evicted)
+//  - the same session+batch is single-flight: a concurrent duplicate never calls
+//    the provider
+//  - an unavailable/empty/throwing session id fails closed as `unidentified`
 //
-// State is in-memory and process-scoped: a restart starts empty and a batch may
-// be attempted once more, re-recorded, with raw tool output never touched.
+// State is in-memory, process-scoped and bounded: <= 8 sessions x 256 batch keys.
 import {
   PROTECTION_FAILURE_MARKER,
   type ProtectedItem,
@@ -25,9 +26,13 @@ interface SessionState {
   paused: boolean;
 }
 
+/** Sessions with persistent failure state. */
 const sessions = new Map<string, SessionState>();
+/** Temporary slots for first attempts that have not yet resolved. */
+const admissions = new Map<string, number>();
+/** `sessionKey\u0000batchKey` currently being summarized. */
+const inFlight = new Set<string>();
 
-/** Exact resolution of the session key; `unidentified` fails closed. */
 export type ProtectionSessionResolution = { status: "ok"; key: string } | { status: "unidentified" };
 
 /**
@@ -48,6 +53,80 @@ export function resolveProtectionSessionKey(ctx: unknown): ProtectionSessionReso
   return { status: "unidentified" };
 }
 
+function totalSlots(): number {
+  return sessions.size + admissions.size;
+}
+
+export function isProtectionTracked(sessionKey: string): boolean {
+  return sessions.has(sessionKey);
+}
+
+export interface ProtectionAttempt {
+  sessionKey: string;
+  batchKey: string;
+}
+
+export type ProtectionAdmission =
+  | { status: "proceed"; attempt: ProtectionAttempt }
+  | { status: "blocked"; reason: ProtectionFailureReason };
+
+/**
+ * Combined admission gate: suppression check, session slot reservation and
+ * same-batch single-flight, all before any provider call. Every `proceed` MUST
+ * be paired with `finishProtectedAttempt` (the summarizer does this in a
+ * `finally`), so exceptions, 429s and aborts cannot leak a slot or a lock.
+ */
+export function beginProtectedAttempt(sessionKey: string, batchKey: string): ProtectionAdmission {
+  const suppressed = getSuppressedProtectionFailure(sessionKey, batchKey);
+  if (suppressed) return { status: "blocked", reason: suppressed };
+  const tracked = isProtectionTracked(sessionKey);
+  if (!tracked && tryAdmitProtectionSession(sessionKey) === "capacity") {
+    return { status: "blocked", reason: "capacity" };
+  }
+  if (!beginProtectionSingleFlight(sessionKey, batchKey)) {
+    if (!tracked) releaseProtectionAdmission(sessionKey);
+    return { status: "blocked", reason: "in-flight" };
+  }
+  return { status: "proceed", attempt: { sessionKey, batchKey } };
+}
+
+/** Releases the temporary slot and the single-flight lock for an attempt. */
+export function finishProtectedAttempt(attempt: ProtectionAttempt): void {
+  endProtectionSingleFlight(attempt.sessionKey, attempt.batchKey);
+  releaseProtectionAdmission(attempt.sessionKey);
+}
+
+/**
+ * Reserves a slot for a first attempt. Returns `already` when the session is
+ * tracked or already reserved, `capacity` when the slot budget is exhausted.
+ */
+export function tryAdmitProtectionSession(sessionKey: string): "admitted" | "already" | "capacity" {
+  if (sessions.has(sessionKey) || admissions.has(sessionKey)) return "already";
+  if (totalSlots() >= MAX_TRACKED_SESSIONS) return "capacity";
+  admissions.set(sessionKey, 1);
+  return "admitted";
+}
+
+/** Releases a temporary slot. A no-op for tracked sessions. */
+export function releaseProtectionAdmission(sessionKey: string): void {
+  const count = admissions.get(sessionKey);
+  if (count === undefined) return;
+  if (count <= 1) admissions.delete(sessionKey);
+  else admissions.set(sessionKey, count - 1);
+}
+
+/** Same session+batch single-flight. `false` means another attempt is running. */
+export function beginProtectionSingleFlight(sessionKey: string, batchKey: string): boolean {
+  const key = `${sessionKey}\u0000${batchKey}`;
+  if (inFlight.has(key)) return false;
+  inFlight.add(key);
+  return true;
+}
+
+export function endProtectionSingleFlight(sessionKey: string, batchKey: string): void {
+  inFlight.delete(`${sessionKey}\u0000${batchKey}`);
+}
+
 /**
  * Returns the reason this batch is suppressed, or undefined when it may be sent.
  * An untracked session over capacity fails closed so no provider call is made.
@@ -58,36 +137,39 @@ export function getSuppressedProtectionFailure(sessionKey: string, batchKey: str
     if (state.paused) return "paused";
     return state.failures.get(batchKey);
   }
-  return sessions.size >= MAX_TRACKED_SESSIONS ? "capacity" : undefined;
+  return totalSlots() >= MAX_TRACKED_SESSIONS ? "capacity" : undefined;
 }
 
 export function isProtectionPaused(sessionKey: string): boolean {
   return sessions.get(sessionKey)?.paused === true;
 }
 
-/** True when the tracked-session table is full and new sessions fail closed. */
 export function isProtectionAtCapacity(): boolean {
-  return sessions.size >= MAX_TRACKED_SESSIONS;
+  return totalSlots() >= MAX_TRACKED_SESSIONS;
 }
 
 export function protectionSessionCount(): number {
   return sessions.size;
 }
 
+export function protectionSlotCount(): number {
+  return totalSlots();
+}
+
 /**
- * Records a failure without evicting any existing session. When the session
- * table is full a new session returns `capacity`; when a session reaches
- * MAX_FAILURES_PER_SESSION it is paused (further protected summaries are refused
- * without provider calls).
+ * Records a failure, converting a temporary admission into persistent state.
+ * Existing sessions are never evicted. A full table returns `capacity`; a
+ * session at MAX_FAILURES_PER_SESSION is paused.
  */
 export function rememberProtectionFailure(
   sessionKey: string,
   batchKey: string,
-  reason: Exclude<ProtectionFailureReason, "paused" | "capacity" | "unidentified">,
+  reason: Exclude<ProtectionFailureReason, "paused" | "capacity" | "unidentified" | "in-flight">,
 ): ProtectionFailureReason {
   let state = sessions.get(sessionKey);
   if (!state) {
-    if (sessions.size >= MAX_TRACKED_SESSIONS) return "capacity";
+    if (!admissions.has(sessionKey) && totalSlots() >= MAX_TRACKED_SESSIONS) return "capacity";
+    admissions.delete(sessionKey);
     state = { failures: new Map(), paused: false };
     sessions.set(sessionKey, state);
   }
@@ -108,9 +190,11 @@ export function protectionFailureCount(sessionKey?: string): number {
   return total;
 }
 
-/** Clears suppression for every session (the only reset path; no production command). */
+/** Clears suppression and admissions for every session (the only reset path). */
 export function clearProtectionFailures(): void {
   sessions.clear();
+  admissions.clear();
+  inFlight.clear();
 }
 
 export function protectionFailureResult(
