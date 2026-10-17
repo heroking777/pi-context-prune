@@ -91,6 +91,7 @@ const fakeApi = {
 const observedApi = instrumentExtensionAPI(fakeApi, () => config, import.meta.url, apiObserver);
 observedApi.on("turn_end", () => measureSummary(one, config, async () => same));
 observedApi.on("message_end", () => measureSummary(one, config, async () => same));
+observedApi.on("session_tree", () => measureSummary(one, config, async () => same));
 observedApi.registerCommand("pruner", { handler: () => measureSummary(one, config, async () => same) });
 observedApi.registerTool({ name: "context_prune", execute: () => measureSummary(one, config, async () => same) });
 assert.equal(observedApi.identity(), true);
@@ -130,8 +131,9 @@ const failingObserver = recorder(blocker);
 const afterWriteFailure = await measureSummary(one, config, async () => same, failingObserver);
 ok("log write failure is non-fatal", afterWriteFailure === same);
 
-const outsideContext = await measureSummary(one, config, async () => same, apiObserver);
-ok("context does not leak across lifecycle boundaries", outsideContext === same && records(apiRecords).at(-1).flushReason === "unknown");
+await handlers.get("session_tree")({}, {});
+const boundaryRecord = records(apiRecords).at(-1);
+ok("session-tree/compaction-like boundary clears prior flush context", boundaryRecord.flushReason === "unknown" && boundaryRecord.sequence === 5);
 
 for (const path of tempDirs) {
   try { rmSync(path, { recursive: true, force: true }); } catch { /* isolated test temp only */ }
