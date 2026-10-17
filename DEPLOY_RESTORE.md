@@ -12,7 +12,7 @@ Current values on the reference host (update them when they change):
 | Production bundle | `dist/index.js` — SHA-256 `58810bf8a135ba6a8975e6848940c5982872b0a63c7910d2a3481fb9b90ad45c` (218,660 B, upstream v1.4.0 + OPT-001/025) |
 | Upstream v1.4.0 baseline bundle | SHA-256 `5ee648f6c314ff317e2800230cf4044fe4be1f82651191a57226f76f11fc9b1b` (202,756 B) |
 | Staging extension dir | `/home/deploy/.pi-work/pruner-phase7/staging/ext/pi-context-prune/` |
-| Staging bundle | `c8629f0f9bbe2d583662ff0459e73f27e991464db2f6b3e24035dacaf2a8d467` (225,700 B) |
+| Clean-clone staging bundle | `022bf10438ea2d47058cd6d47f8d8a9b96faf42e6eb815348736d4f426c2ddcb` (223,666 B; recorded lockfile/build environment) |
 | Settings | `/home/deploy/.pi/agent/context-prune/settings.json` |
 
 > **Never edit `dist/index.js` by hand and never swap it under a running Pi.** `dist/` is
@@ -31,10 +31,11 @@ git clone git@github.com:heroking777/pi-context-prune.git
 cd pi-context-prune
 git checkout pruner-phase6-source-v1.4.0
 
-npm install                            # dev deps only (esbuild, typescript, @types/node)
+npm ci                                 # exact dev deps pinned by package-lock.json
 npx tsc --noEmit -p tsconfig.json      # strict type check -> must print nothing
 npm run build                          # -> dist/index.js + dist/index.js.map
 npm run check                          # build + package check
+npm test                               # 177 regression + 30 portable staging checks
 sha256sum dist/index.js                # record the SHA you are about to deploy
 ```
 
@@ -68,11 +69,13 @@ Offline verification (no network, **no real LLM call**):
 
 ```bash
 # 3a. Load + registration + lifecycle hooks against the packaged Pi runtime
-node staging/load.mjs
+node tests/staging.mjs
 
-# 3b. Regression suite + differential harness against the freshly built bundle
-cd <verification-workspace>            # holds run.mjs / diff6.mjs
-node run.mjs && node diff6.mjs
+# 3b. Regression + staging suite (builds baseline from the v1.4.0 Git commit)
+npm test
+
+# Optional 41-case differential requires an external Phase5 test bundle; no bundle is committed.
+PRUNER_PHASE5_BUNDLE=/path/to/phase5-reference.mjs npm test
 ```
 
 Real-runtime load check in a **fully isolated** Pi instance — no prompt, so no model call:

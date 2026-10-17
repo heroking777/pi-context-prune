@@ -22,11 +22,17 @@ in-house pruner modifications under source control instead of patching the gener
 Rebuild (`dist/` is generated and gitignored — never hand-edit it):
 
 ```bash
-npm install                          # dev deps only; pi-* peers stay external
+npm ci                               # exact dev dependency versions from package-lock.json
 npx tsc --noEmit -p tsconfig.json    # strict type check
 npm run build                        # -> dist/index.js (+ dist/index.js.map)
 npm run check                        # build + package check
+npm test                             # regression + staging; exits 2 if Phase5 comparison baseline is absent
 ```
+
+The portable test assets and exact PASS/SKIP semantics are documented in
+[`tests/README.md`](./tests/README.md). Tests use only synthetic fixture data; no production
+session, credentials, or live LLM API is accessed.
+
 
 ## Check out my other Pi extensions
 
