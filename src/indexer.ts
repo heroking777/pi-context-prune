@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { CapturedBatch, IndexEntryData, ToolCallRecord } from "./types.js";
 import { CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY } from "./types.js";
@@ -52,11 +53,44 @@ export interface IndexSearchResult {
   matchCount: number;
 }
 
+const SEARCH_REF_PREFIX = "s-";
+const SEARCH_REF_HEX_CHARS = 16;
+
+/**
+ * Derives the opaque search ref for a tool call. The ref is a truncated
+ * SHA-256 of the id, so it is stable across session reconstruction, bounded in
+ * length, and never reveals the underlying id. The `s-` prefix cannot collide
+ * with existing `t<n>` summary refs.
+ */
+export function deriveSearchRef(toolCallId: string, hexChars: number = SEARCH_REF_HEX_CHARS): string {
+  return `${SEARCH_REF_PREFIX}${createHash("sha256").update(toolCallId).digest("hex").slice(0, hexChars)}`;
+}
+
 export class ToolCallIndexer {
   private index = new Map<string, ToolCallRecord>();
   private aliasToToolCallId = new Map<string, string>();
   private toolCallIdToAlias = new Map<string, string>();
+  private searchRefToToolCallId = new Map<string, string>();
+  private toolCallIdToSearchRef = new Map<string, string>();
+  private ambiguousSearchRefs = new Set<string>();
   private nextShortAliasNumber = 1;
+
+  /** Overridable so tests can force a hash collision and prove fail-closed behavior. */
+  protected deriveSearchRefFor(toolCallId: string): string {
+    return deriveSearchRef(toolCallId);
+  }
+
+  private registerSearchRef(toolCallId: string): void {
+    const ref = this.deriveSearchRefFor(toolCallId);
+    const existing = this.searchRefToToolCallId.get(ref);
+    if (existing !== undefined && existing !== toolCallId) {
+      // Collision: never resolve this ref to a guessed record.
+      this.ambiguousSearchRefs.add(ref);
+      return;
+    }
+    this.searchRefToToolCallId.set(ref, toolCallId);
+    this.toolCallIdToSearchRef.set(toolCallId, ref);
+  }
 
   /**
    * Rebuilds the in-memory index from session history by scanning all
@@ -66,6 +100,9 @@ export class ToolCallIndexer {
     this.index.clear();
     this.aliasToToolCallId.clear();
     this.toolCallIdToAlias.clear();
+    this.searchRefToToolCallId.clear();
+    this.toolCallIdToSearchRef.clear();
+    this.ambiguousSearchRefs.clear();
     this.nextShortAliasNumber = 1;
 
     const branch = ctx.sessionManager.getBranch();
@@ -75,6 +112,7 @@ export class ToolCallIndexer {
         if (data && Array.isArray(data.toolCalls)) {
           for (const toolCall of data.toolCalls) {
             this.index.set(toolCall.toolCallId, toolCall);
+            this.registerSearchRef(toolCall.toolCallId);
           }
         }
         continue;
@@ -135,7 +173,10 @@ export class ToolCallIndexer {
    */
   resolveToolCallId(toolCallIdOrAlias: string): string | undefined {
     if (this.index.has(toolCallIdOrAlias)) return toolCallIdOrAlias;
-    return this.aliasToToolCallId.get(toolCallIdOrAlias);
+    if (this.ambiguousSearchRefs.has(toolCallIdOrAlias)) return undefined;
+    const aliased = this.aliasToToolCallId.get(toolCallIdOrAlias);
+    if (aliased !== undefined) return aliased;
+    return this.searchRefToToolCallId.get(toolCallIdOrAlias);
   }
 
   /**
@@ -162,10 +203,33 @@ export class ToolCallIndexer {
   }
 
   /**
+   * Registers a record that was persisted directly to session history, keeping
+   * the index and the safe search-ref map in sync (addBatch does the same for
+   * the appendEntry path).
+   */
+  indexPersistedRecord(record: ToolCallRecord): void {
+    this.index.set(record.toolCallId, record);
+    this.registerSearchRef(record.toolCallId);
+  }
+
+  /**
    * Returns the model-visible short ref for a tool call, if one was allocated.
    */
   getShortId(toolCallId: string): string | undefined {
     return this.toolCallIdToAlias.get(toolCallId);
+  }
+
+  /**
+   * Returns the safe ref to show for a tool call: the existing summary ref if
+   * one exists, otherwise the opaque search ref. Returns undefined for a ref
+   * that is ambiguous due to a (theoretical) hash collision, so callers never
+   * publish a ref that could resolve to the wrong record.
+   */
+  getSearchRef(toolCallId: string): string | undefined {
+    const alias = this.toolCallIdToAlias.get(toolCallId);
+    if (alias !== undefined) return alias;
+    const ref = this.toolCallIdToSearchRef.get(toolCallId) ?? this.deriveSearchRefFor(toolCallId);
+    return this.ambiguousSearchRefs.has(ref) ? undefined : ref;
   }
 
   /**
@@ -207,6 +271,7 @@ export class ToolCallIndexer {
         timestamp: batch.timestamp,
       };
       this.index.set(record.toolCallId, record);
+      this.registerSearchRef(record.toolCallId);
       records.push(record);
     }
 

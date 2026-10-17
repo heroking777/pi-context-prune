@@ -49,7 +49,7 @@ export {
   shouldMidTaskAutoPrune,
 } from "./src/flush-policy.js";
 export { serializeBatchForSummarizer } from "./src/batch-capture.js";
-export { ToolCallIndexer, MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery } from "./src/indexer.js";
+export { ToolCallIndexer, MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery, deriveSearchRef } from "./src/indexer.js";
 export { registerIndexSearchTool } from "./src/index-search-tool.js";
 export { registerQueryTool } from "./src/query-tool.js";
 export { formatSummaryToolCallRefs } from "./src/summary-refs.js";

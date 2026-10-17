@@ -10,7 +10,7 @@ export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizeBatch
   instrumentExtensionAPI, recordBatchOutcome, recordFlushCommit, runWithFlushReason,
   isFloorSkippedBatch, RATE_LIMITED_MARKER, shouldMidTaskAutoPrune,
   ToolCallIndexer, registerIndexSearchTool, registerQueryTool,
-  MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery,
+  MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery, deriveSearchRef,
   formatSummaryToolCallRefs, CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY } = api;
 export const { mappedReasoningEffort } = await import("./provider-contract.mjs");
 export const state = { pass: 0, fail: 0 };

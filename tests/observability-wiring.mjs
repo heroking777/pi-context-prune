@@ -131,10 +131,12 @@ ok("sent messages contain no raw summary payload", sent.length === 0, JSON.strin
 // Phase 26: a size-floor batch has no visible ref, so it must be discoverable by keyword.
 const searchResult = await tools.get("context_index_search").execute("s", { query: "SECRET_MARKER_ZZZ" }, undefined, undefined, ctx);
 const searchText = searchResult.content.map((part) => part.text).join("\n");
-ok("ref-less search finds the size-floor call", searchText.includes("wiring-tc-1") && searchText.includes(`bytes: ${FLOOR_RAW.length}`));
+const discoveredRef = searchResult.details.refs[0].ref;
+ok("ref-less search finds the size-floor call", searchText.includes(`bytes: ${FLOOR_RAW.length}`) && /^s-[0-9a-f]{16}$/.test(discoveredRef));
 ok("ref-less search returns metadata, not the raw output", !searchText.includes("tiny payload"));
-const retrieveResult = await tools.get("context_tree_query").execute("r", { toolCallIds: ["wiring-tc-1"] }, undefined, undefined, ctx);
-ok("discovered id retrieves the original output", retrieveResult.content.map((part) => part.text).join("\n").includes(FLOOR_RAW));
+ok("ref-less search does not expose the raw toolCallId", !searchText.includes("wiring-tc-1") && !JSON.stringify(searchResult.details).includes("wiring-tc-1"));
+const retrieveResult = await tools.get("context_tree_query").execute("r", { toolCallIds: [discoveredRef] }, undefined, undefined, ctx);
+ok("discovered ref retrieves the original output", retrieveResult.content.map((part) => part.text).join("\n").includes(FLOOR_RAW));
 
 // Phase 24 regression: index succeeds but the frontier persist fails. The log must
 // expose the partial persistence instead of looking like a complete flush.

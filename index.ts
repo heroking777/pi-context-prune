@@ -170,7 +170,7 @@ export default function (pi: ExtensionAPI) {
     }));
 
     for (const record of records) {
-      indexer.getIndex().set(record.toolCallId, record);
+      indexer.indexPersistedRecord(record);
     }
 
     appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: records } as IndexEntryData);

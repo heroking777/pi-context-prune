@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import {
   ToolCallIndexer, registerIndexSearchTool, registerQueryTool, formatSummaryToolCallRefs,
-  MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery,
+  MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery, deriveSearchRef,
   CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY, ok,
 } from "./test-support.mjs";
 
@@ -42,13 +42,15 @@ const pi = fakePi();
 registerIndexSearchTool(pi, indexer);
 registerQueryTool(pi, indexer);
 const searchOut = textOf(await call(pi.tools.get("context_index_search"), { query: "rollback" }));
-ok("explicit tool returns the id needed for retrieval", searchOut.includes("floor-0") && searchOut.includes("ref: (none)"));
-const retrieve = await call(pi.tools.get("context_tree_query"), { toolCallIds: ["floor-0"] });
-ok("raw output is retrievable with the discovered id", textOf(retrieve).includes("ROLLBACK=restore release from snapshot"));
+const searchRef = (await call(pi.tools.get("context_index_search"), { query: "rollback" })).details.refs[0].ref;
+ok("search returns a safe ref and no raw toolCallId", /^s-[0-9a-f]{16}$/.test(searchRef) && !searchOut.includes("floor-0"));
+const retrieve = await call(pi.tools.get("context_tree_query"), { toolCallIds: [searchRef] });
+ok("raw output is retrievable with the discovered search ref", textOf(retrieve).includes("ROLLBACK=restore release from snapshot"));
+ok("exact retrieval by the raw id still works for compatibility", textOf(await call(pi.tools.get("context_tree_query"), { toolCallIds: ["floor-0"] })).includes("ROLLBACK=restore release from snapshot"));
 
 // 3. Search output stays metadata-only.
 ok("search output never contains raw output text or secrets", !searchOut.includes(SECRET) && !searchOut.includes("ROLLBACK=restore release"));
-ok("search output reports a bounded identifier view", /ref: .* \| id: .* \| tool: .* \| turn: .* \| status: .* \| bytes: \d+/.test(searchOut));
+ok("search output reports a bounded ref view without any id field", /ref: .* \| tool: .* \| turn: .* \| status: .* \| bytes: \d+/.test(searchOut) && !searchOut.includes("id:"));
 
 // 4. No fabrication.
 const missOut = textOf(await call(pi.tools.get("context_index_search"), { query: "definitely-absent" }));
@@ -81,7 +83,12 @@ ok("search path exists after compaction reconstruction", rebuilt.searchRecords("
 ok("summary refs survive reconstruction for reference lookup", rebuilt.getShortId("rebuilt-0") === "t9" && rebuilt.getRecord("t9")?.toolCallId === "rebuilt-0");
 const rebuiltPi = fakePi();
 registerIndexSearchTool(rebuiltPi, rebuilt);
-ok("search tool still resolves after reconstruction", textOf(await call(rebuiltPi.tools.get("context_index_search"), { query: "restore release" })).includes("floor-0"));
+registerQueryTool(rebuiltPi, rebuilt);
+const rebuiltSearch = await call(rebuiltPi.tools.get("context_index_search"), { query: "restore release" });
+const rebuiltRef = rebuiltSearch.details.refs[0].ref;
+ok("search tool still resolves after reconstruction without exposing ids", !textOf(rebuiltSearch).includes("floor-0") && /^s-[0-9a-f]{16}$/.test(rebuiltRef));
+ok("reconstructed search ref retrieves the exact record", textOf(await call(rebuiltPi.tools.get("context_tree_query"), { toolCallIds: [rebuiltRef] })).includes("ROLLBACK=restore release from snapshot"));
+ok("search ref is stable across reconstruction", deriveSearchRef("floor-0") === rebuiltRef);
 
 // 7. Constant-size summary footer guide (bounded per-summary cost).
 const withRefs = formatSummaryToolCallRefs([{ shortId: "t1", toolCallId: "ref-0" }]);
@@ -125,21 +132,23 @@ for (const [name, value] of Object.entries(CATEGORIES)) {
   const keyword = KEYWORDS[name];
   const res = await call(catTool, { query: keyword });
   const text = textOf(res);
-  const ids = res.details.refs.map((ref) => ref.id);
+  const refs = res.details.refs.map((ref) => ref.ref);
   const hitIndexed = catIndexer.searchRecords(keyword).matchCount > 0;
-  const discovered = hitIndexed && ids.length > 0 && !text.includes(value);
+  const discovered = hitIndexed && refs.length > 0 && !text.includes(value);
   ok(`category ${name}: discoverable by keyword without a ref`, discovered, text.slice(0, 80));
-  const target = ids[0];
+  const target = refs[0];
   const raw = textOf(await call(catQuery, { toolCallIds: [target] }));
   ok(`category ${name}: original output retrievable`, target ? raw.includes(value) : false);
 }
-ok("floor-batch ids are discoverable even though no ref was ever published", catIndexer.getShortId("floor-sha") === undefined && (await call(catTool, { query: "FINAL_SHA" })).details.refs[0].id === "floor-sha");
+ok("floor-batch refs are discoverable even though no summary ref was ever published", catIndexer.getShortId("floor-sha") === undefined && /^s-[0-9a-f]{16}$/.test((await call(catTool, { query: "FINAL_SHA" })).details.refs[0].ref));
+ok("summarized records reuse their existing t<n> summary ref", (await call(catTool, { query: "IntegrityError" })).details.refs[0].ref === "t2");
 
 // 8b. Phase 28 input hardening: empty, oversized and hostile limits.
 ok("empty and whitespace queries are rejected", !validateSearchQuery("").ok && validateSearchQuery("   ").ok === false);
 ok("empty query never matches all", indexer.searchRecords("").matchCount === 0 && indexer.searchRecords("   ").matchCount === 0);
 ok("query length is bounded", !validateSearchQuery("x".repeat(MAX_SEARCH_QUERY_CHARS + 1)).ok && validateSearchQuery("x".repeat(MAX_SEARCH_QUERY_CHARS)).ok === true);
-ok("limit is coerced into 1..20", sanitizeSearchLimit(undefined) === 5 && sanitizeSearchLimit(Number.NaN) === 5 && sanitizeSearchLimit(Number.POSITIVE_INFINITY) === 5 && sanitizeSearchLimit(-7) === 1 && sanitizeSearchLimit(0) === 1 && sanitizeSearchLimit(3.7) === 3 && sanitizeSearchLimit(1e9) === 20 && sanitizeSearchLimit("5") === 5);
+ok("limit is coerced into 1..20", sanitizeSearchLimit(undefined) === 5 && sanitizeSearchLimit(Number.NaN) === 5 && sanitizeSearchLimit(Number.POSITIVE_INFINITY) === 5 && sanitizeSearchLimit(-7) === 1 && sanitizeSearchLimit(0) === 1 && sanitizeSearchLimit(3.7) === 3 && sanitizeSearchLimit(1e9) === 20);
+ok("non-numeric limits fall back to the default 5", sanitizeSearchLimit("5") === 5 && sanitizeSearchLimit("7") === 5 && sanitizeSearchLimit("99") === 5 && sanitizeSearchLimit({}) === 5 && sanitizeSearchLimit(null) === 5 && sanitizeSearchLimit(true) === 5 && sanitizeSearchLimit([]) === 5 && sanitizeSearchLimit(undefined) === 5);
 const hostileLimits = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -5, 0, 2.9, 1e9];
 let hostileOk = true;
 for (const value of hostileLimits) {
@@ -154,7 +163,7 @@ ok("tool reports an oversized-query error clearly", longToolOut.details.error ==
 const nanLimitOut = await call(pi.tools.get("context_index_search"), { query: "IntegrityError", limit: Number.NaN });
 ok("tool survives a NaN limit", Array.isArray(nanLimitOut.details.refs) && nanLimitOut.details.refs.length <= 20);
 
-// 8c. Phase 28 id safety: display is sanitized, retrieval stays exact.
+// 8c. Phase 29 safe refs: raw ids never appear, retrieval stays exact.
 const SPECIAL_IDS = {
   normal: "tc-normal-1",
   long: `tc-${'L'.repeat(5000)}`,
@@ -169,16 +178,52 @@ registerIndexSearchTool(idPi, idIndexer);
 registerQueryTool(idPi, idIndexer);
 const idSearchOut = await call(idPi.tools.get("context_index_search"), { query: "payload-of", limit: 20 });
 const idSearchText = textOf(idSearchOut);
-ok("search returns every hostile id exactly once in details", idSearchOut.details.refs.length === 4 && idSearchOut.details.refs.every((ref) => Object.values(SPECIAL_IDS).includes(ref.id)));
-ok("displayed ids contain no delimiter or control characters", idSearchText.split("\n").filter((line) => line.startsWith("- ref:")).every((line) => line.length < 200) && !idSearchText.includes("\u0000"));
-ok("controls: display keeps the metadata shape for hostile ids", idSearchText.split("\n").filter((line) => line.startsWith("- ref:")).length === 4);
-ok("long ids are truncated for display but kept in details", idSearchText.includes("…") && idSearchOut.details.refs.some((ref) => ref.id.length > 5000));
+const idRefs = idSearchOut.details.refs.map((entry) => entry.ref);
+ok("search returns one bounded safe ref per hostile id", idRefs.length === 4 && idRefs.every((ref) => /^s-[0-9a-f]{16}$/.test(ref)) && new Set(idRefs).size === 4);
+ok("no raw toolCallId appears in search content", Object.values(SPECIAL_IDS).every((id) => !idSearchText.includes(id)));
+ok("no raw toolCallId appears in search details", !JSON.stringify(idSearchOut.details).includes(SECRET) && !JSON.stringify(idSearchOut.details).includes("payload-of-"));
+ok("search content has no id field and a bounded ref length", !idSearchText.includes("id:") && idSearchText.split("\n").filter((line) => line.startsWith("- ref:")).every((line) => line.length < 200));
 for (const [kind, id] of Object.entries(SPECIAL_IDS)) {
-  const retrieved = textOf(await call(idPi.tools.get("context_tree_query"), { toolCallIds: [id] }));
-  ok(`retrieval stays exact for ${kind} id`, retrieved.includes(`payload-of-${id.length}-chars`));
+  const ref = idRefs.find((candidate) => idIndexer.getRecord(candidate)?.toolCallId === id);
+  ok(`each ${kind} id maps to its own ref`, typeof ref === "string");
+  const retrieved = textOf(await call(idPi.tools.get("context_tree_query"), { toolCallIds: [ref] }));
+  ok(`retrieval stays exact for ${kind} id via its ref`, retrieved.includes(`payload-of-${id.length}-chars`));
 }
 ok("raw result text is never echoed by search even for hostile ids", !idSearchText.includes("payload-of-"));
-ok("a secret embedded in an id is echoed only as an internal identifier", idSearchOut.details.refs.some((ref) => ref.id.includes(SECRET)));
+ok("secret embedded in an id is not serialized anywhere in search output", !JSON.stringify([idSearchText, idSearchOut.details]).includes(SECRET));
+ok("direct retrieval by raw hostile id still works", textOf(await call(idPi.tools.get("context_tree_query"), { toolCallIds: [SPECIAL_IDS.secretId] })).includes(`payload-of-${SPECIAL_IDS.secretId.length}-chars`));
+
+// 8d. Hash collision must fail closed, never resolve to a guessed record.
+class CollidingIndexer extends ToolCallIndexer {
+  deriveSearchRefFor() { return "s-0000000000000000"; }
+}
+const collisionIndexer = new CollidingIndexer();
+collisionIndexer.addBatch({ turnIndex: 1, timestamp: 1, toolCalls: [
+  { toolName: "bash", toolCallId: "coll-a", resultText: "collision payload alpha", args: {}, isError: false },
+  { toolName: "bash", toolCallId: "coll-b", resultText: "collision payload beta", args: {}, isError: false },
+] }, fakePi());
+ok("colliding ref is not published for either record", collisionIndexer.getSearchRef("coll-a") === undefined && collisionIndexer.getSearchRef("coll-b") === undefined);
+ok("colliding ref fails closed on resolve", collisionIndexer.resolveToolCallId("s-0000000000000000") === undefined && collisionIndexer.getRecord("s-0000000000000000") === undefined);
+ok("raw ids still resolve under collision", collisionIndexer.getRecord("coll-a")?.resultText === "collision payload alpha" && collisionIndexer.getRecord("coll-b")?.resultText === "collision payload beta");
+const collisionPi = fakePi();
+registerIndexSearchTool(collisionPi, collisionIndexer);
+registerQueryTool(collisionPi, collisionIndexer);
+const collisionOut = await call(collisionPi.tools.get("context_index_search"), { query: "collision payload" });
+ok("colliding search results expose no ref and no id", collisionOut.details.refs.every((entry) => entry.ref === null) && !textOf(collisionOut).includes("coll-a") && !textOf(collisionOut).includes("coll-b"));
+ok("unresolvable colliding ref is reported not found", textOf(await call(collisionPi.tools.get("context_tree_query"), { toolCallIds: ["s-0000000000000000"] })).includes("not found"));
+
+// 8e. Ref derivation: unique, bounded and stable.
+const many = new Set();
+for (let i = 0; i < 50000; i++) many.add(deriveSearchRef(`bulk-${i}`));
+ok("50k derived refs are unique and bounded", many.size === 50000 && [...many].every((ref) => ref.length === 18));
+ok("derivation is deterministic and does not embed the id", deriveSearchRef("abc") === deriveSearchRef("abc") && !deriveSearchRef("abc").includes("abc"));
+ok("summary refs and search refs cannot share a namespace", deriveSearchRef("x").startsWith("s-") && /^t\d+$/.test("t7"));
+
+// 8f. Records persisted directly (session-delivery path) must also be resolvable.
+const persisted = new ToolCallIndexer();
+persisted.indexPersistedRecord({ toolCallId: "persisted-0", toolName: "bash", args: {}, resultText: "persisted payload", isError: false, turnIndex: 1, timestamp: 1 });
+const persistedRef = persisted.getSearchRef("persisted-0");
+ok("directly persisted records are resolvable by their search ref", /^s-[0-9a-f]{16}$/.test(persistedRef) && persisted.getRecord(persistedRef)?.resultText === "persisted payload");
 
 // 9. Registered tool surface.
 assert.ok(pi.tools.has("context_index_search"));

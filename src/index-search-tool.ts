@@ -7,29 +7,16 @@ import {
   type ToolCallIndexer,
 } from "./indexer.js";
 
-const MAX_DISPLAY_ID = 80;
-
-/**
- * Renders an id for the human-readable line without letting control characters
- * or the `|`/backtick delimiters forge extra metadata. The exact id is always
- * preserved in `details` so retrieval is never weakened.
- */
-function displayId(id: string): string {
-  let cleaned = "";
-  for (const ch of id) {
-    const code = ch.codePointAt(0) ?? 0;
-    cleaned += code < 0x20 || code === 0x7f || ch === "|" || ch === "`" ? "_" : ch;
-  }
-  return cleaned.length > MAX_DISPLAY_ID ? `${cleaned.slice(0, MAX_DISPLAY_ID)}…` : cleaned;
-}
-
 const MAX_MATCHES = 20;
+
+const SEARCH_GUIDE = "Use context_tree_query with the returned ref to read the original output.";
 
 /**
  * Explicit, call-only search over the pruner index. It exists so information
  * that was indexed without a visible short ref (size-floor batches) can still
- * be found by keyword. It never injects raw tool output: it returns only
- * identifiers and safe metadata, and retrieval stays with context_tree_query.
+ * be found by keyword. It never injects raw tool output and never exposes raw
+ * tool call ids: it returns only opaque safe refs and safe metadata, and
+ * retrieval stays with context_tree_query.
  */
 export function registerIndexSearchTool(pi: ExtensionAPI, indexer: ToolCallIndexer): void {
   pi.registerTool({
@@ -37,12 +24,12 @@ export function registerIndexSearchTool(pi: ExtensionAPI, indexer: ToolCallIndex
     label: "Search Pruned Tool Index",
     description:
       "Search tool call outputs that were pruned or summarized away, when you do not have a short ref. " +
-      "Matches keywords against tool names, arguments and stored output text, and returns only short refs, " +
-      "ids and safe metadata. Retrieve the full original output afterwards with context_tree_query.",
+      "Matches keywords against tool names, arguments and stored output text, and returns only short refs " +
+      "and safe metadata. Retrieve the full original output afterwards with context_tree_query.",
     promptSnippet: "Find pruned tool outputs by keyword",
     promptGuidelines: [
       "Use context_index_search when you need a pruned tool output but have no short ref (for example after a size-floor skip or a context compaction).",
-      "Search returns identifiers only. Call context_tree_query with the returned ref or id to read the original output.",
+      "Search returns short refs only. Call context_tree_query with the returned ref to read the original output.",
       "If search reports no match, the content is not in the index; do not assume it exists.",
     ],
     parameters: Type.Object({
@@ -75,12 +62,12 @@ export function registerIndexSearchTool(pi: ExtensionAPI, indexer: ToolCallIndex
         lines.push(
           `${matchCount} match(es) in the pruner index` +
             (records.length < matchCount ? `, showing first ${records.length}` : "") +
-            ". Use context_tree_query with a ref or id to read the original output.",
+            `. ${SEARCH_GUIDE}`,
         );
         for (const record of records) {
-          const ref = indexer.getShortId(record.toolCallId);
+          const ref = indexer.getSearchRef(record.toolCallId);
           lines.push(
-            `- ref: ${ref ?? "(none)"} | id: ${displayId(record.toolCallId)} | tool: ${record.toolName} | ` +
+            `- ref: ${ref ?? "(unavailable)"} | tool: ${record.toolName} | ` +
               `turn: ${record.turnIndex} | status: ${record.isError ? "ERROR" : "OK"} | bytes: ${record.resultText.length}`,
           );
         }
@@ -93,8 +80,7 @@ export function registerIndexSearchTool(pi: ExtensionAPI, indexer: ToolCallIndex
           matchCount,
           returned: records.length,
           refs: records.map((record) => ({
-            id: record.toolCallId,
-            ref: indexer.getShortId(record.toolCallId) ?? null,
+            ref: indexer.getSearchRef(record.toolCallId) ?? null,
             tool: record.toolName,
             error: record.isError,
           })),
