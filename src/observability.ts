@@ -3,11 +3,14 @@ import type { CapturedBatch, ContextPruneConfig } from "./types.js";
 import {
   defaultMetadataObserver,
   MetadataObserver,
+  type BatchCommitInfo,
+  type BatchCommitOutcome,
   type FlushReason,
   type ObservationContext,
 } from "./observability-log.js";
 import { rawChars } from "./observability-log.js";
 export { MetadataObserver, defaultMetadataObserver } from "./observability-log.js";
+export type { BatchCommitInfo, BatchCommitOutcome, FlushReason } from "./observability-log.js";
 
 const contextStorage = new AsyncLocalStorage<ObservationContext>();
 
@@ -62,37 +65,41 @@ export async function measureSummary<T>(
   }
 }
 
-export function recordFloorSkip(batch: CapturedBatch, threshold: number): void {
+export function recordBatchOutcome(
+  batch: CapturedBatch,
+  outcome: BatchCommitOutcome,
+  info: BatchCommitInfo = { indexPersisted: false },
+): void {
   const context = contextStorage.getStore();
   const observer = context?.observer ?? defaultMetadataObserver;
-  try { observer.recordFloorSkip(batch, threshold, context); } catch { /* non-fatal */ }
-  if (context?.observer.enabled) {
+  try { observer.recordBatchOutcome(batch, outcome, info, context); } catch { /* non-fatal */ }
+  if (outcome === "skipped-size-floor" && context?.observer.enabled) {
     context.floorSkippedCallCount += batch.toolCalls.length;
     context.floorSkippedRawCharCount += rawChars(batch);
   }
 }
 
-function reasonForEvent(name: string, config: ContextPruneConfig): FlushReason {
-  if (name === "turn_end") {
-    if (config.pruneOn === "every-turn") return "every_turn";
-    return config.midTaskAutoPrune ? "threshold" : "unknown";
-  }
-  if (name === "message_end") return "message_end";
-  if (name === "tool_execution_end") return "tool_execution_end";
-  return "unknown";
+/**
+ * Attaches the flush reason that the calling code actually evaluated. The
+ * event-name proxy cannot prove why a flush fired, so it records no reason;
+ * only these explicit scopes name a reason.
+ */
+export function runWithFlushReason<T>(reason: FlushReason, action: () => T): T {
+  const context = contextStorage.getStore();
+  if (!context?.observer.enabled) return action();
+  return contextStorage.run({ ...context, reason }, action);
 }
 
 function wrapHandler(
   handler: (...args: any[]) => any,
-  reason: FlushReason | ((config: ContextPruneConfig | null) => FlushReason),
+  reason: FlushReason,
   getConfig: () => ContextPruneConfig,
   observer: MetadataObserver,
 ): (...args: any[]) => any {
   return function (this: unknown, ...args: any[]) {
     let config: ContextPruneConfig | null = null;
     try { config = getConfig(); } catch { /* leave metadata unknown */ }
-    const resolved = typeof reason === "function" ? reason(config) : reason;
-    return withFlushObservation(resolved, config, () => handler.apply(this, args), observer);
+    return withFlushObservation(reason, config, () => handler.apply(this, args), observer);
   };
 }
 
@@ -109,7 +116,7 @@ export function instrumentExtensionAPI<T extends object>(
       const method = Reflect.get(target, property, receiver);
       if (property === "on" && typeof method === "function") {
         return (name: string, handler: (...args: any[]) => any, ...rest: any[]) =>
-          method.call(target, name, wrapHandler(handler, (config) => config ? reasonForEvent(name, config) : "unknown", getConfig, observer), ...rest);
+          method.call(target, name, wrapHandler(handler, "unknown", getConfig, observer), ...rest);
       }
       if (property === "registerCommand" && typeof method === "function") {
         return (name: string, options: any, ...rest: any[]) => {

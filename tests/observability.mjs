@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   DEFAULT_CONFIG, MetadataObserver, measureSummary, withFlushObservation,
   withPendingBatchMetrics, instrumentExtensionAPI, isFloorSkippedBatch,
+  recordBatchOutcome, runWithFlushReason,
   RATE_LIMITED_MARKER, shouldMidTaskAutoPrune, summarizeBatch, makeCtx, state, ok,
 } from "./test-support.mjs";
 
@@ -56,26 +57,41 @@ ok("summary usage and latency are recorded", firstRecord.summaryApiUsage.inputTo
 ok("raw IDs and private text are absent", !privateValues.some((value) => JSON.stringify(firstRecord).includes(value)) && !JSON.stringify(firstRecord).includes("call-secret-one"));
 ok("call refs are fixed-length pseudonyms", /^[a-f0-9]{20}$/.test(firstRecord.firstCallRef) && firstRecord.firstCallRef === firstRecord.lastCallRef);
 
+const beforePredicate = records(dir).length;
 withFlushObservation("threshold", config, () => {
   assert.equal(isFloorSkippedBatch(batch("floor-private", "tiny"), 100), true);
+  assert.equal(isFloorSkippedBatch(batch("floor-private", "tiny"), 100), true);
 }, observer);
-const floor = records(dir).at(-1);
-ok("floor-only is recorded without API usage", floor.outcome === "skipped-size-floor" && floor.summaryApiUsage.inputTokens === null && floor.summaryLatencyMs === 0);
-const combinedDir = temp("mixed-flush");
-const combinedObserver = recorder(combinedDir);
+ok("floor predicate is pure and records nothing", records(dir).length === beforePredicate);
+
+// Regression test for the Phase 22 double-record defect: the flush loop evaluates
+// the floor predicate twice per batch (filter + results map). Observation moved
+// to the single commit site, so one batch yields exactly one commit record.
+const floorOnceDir = temp("floor-once");
+const floorOnceObserver = recorder(floorOnceDir);
 const floorBatch = batch("floor-mixed", "tiny");
 await withFlushObservation("threshold", config, () => {
   isFloorSkippedBatch(floorBatch, 100);
+  isFloorSkippedBatch(floorBatch, 100);
+  recordBatchOutcome(floorBatch, "skipped-size-floor", { indexPersisted: true, threshold: 100 });
+}, floorOnceObserver);
+const floorRecords = records(floorOnceDir);
+ok("double predicate check yields exactly one floor commit record", floorRecords.length === 1 && floorRecords[0].event === "batch_outcome" && floorRecords[0].outcome === "skipped-size-floor" && floorRecords[0].indexPersisted === true && floorRecords[0].summaryApiUsage.inputTokens === null);
+
+const combinedDir = temp("mixed-flush");
+const combinedObserver = recorder(combinedDir);
+await withFlushObservation("threshold", config, () => {
+  recordBatchOutcome(floorBatch, "skipped-size-floor", { indexPersisted: true, threshold: 100 });
   return withPendingBatchMetrics([one], () => measureSummary(one, config, async () => same, combinedObserver));
 }, combinedObserver);
 const combinedSummary = records(combinedDir).at(-1);
-ok("flush pending totals include floor-only and API batches", combinedSummary.pendingCallCount === 2 && combinedSummary.pendingRawCharCount === floorBatch.toolCalls[0].resultText.length + one.toolCalls[0].resultText.length && combinedSummary.pendingScope === "flush");
+ok("flush pending totals include floor-only and API batches", combinedSummary.event === "summary_api" && combinedSummary.pendingCallCount === 2 && combinedSummary.pendingRawCharCount === floorBatch.toolCalls[0].resultText.length + one.toolCalls[0].resultText.length && combinedSummary.pendingScope === "flush");
 
 await withFlushObservation("threshold", config, () => measureSummary(one, config, async () => null, observer), observer);
 const cooldown = { [RATE_LIMITED_MARKER]: true, error: privateValues[3] };
 await withFlushObservation("threshold", config, () => measureSummary(one, config, async () => cooldown, observer), observer);
 const failureRecords = records(dir).slice(-2);
-ok("summary failure and cooldown are classified without error text", failureRecords[0].outcome === "failed" && failureRecords[1].outcome === "rate-limited" && !JSON.stringify(failureRecords).includes(privateValues[3]));
+ok("summary failure and cooldown are classified without error text", failureRecords[0].event === "summary_api" && failureRecords[0].outcome === "failed" && failureRecords[1].event === "summary_api" && failureRecords[1].outcome === "rate-limited" && !JSON.stringify(failureRecords).includes(privateValues[3]));
 
 const apiRecords = temp("api");
 const apiObserver = recorder(apiRecords);
@@ -89,18 +105,19 @@ const fakeApi = {
   identity() { return this === fakeApi; },
 };
 const observedApi = instrumentExtensionAPI(fakeApi, () => config, import.meta.url, apiObserver);
-observedApi.on("turn_end", () => measureSummary(one, config, async () => same));
-observedApi.on("message_end", () => measureSummary(one, config, async () => same));
+observedApi.on("turn_end", () => runWithFlushReason("every_turn", () => measureSummary(one, config, async () => same)));
+observedApi.on("message_end", () => runWithFlushReason("message_end", () => measureSummary(one, config, async () => same)));
 observedApi.on("session_tree", () => measureSummary(one, config, async () => same));
 observedApi.registerCommand("pruner", { handler: () => measureSummary(one, config, async () => same) });
 observedApi.registerTool({ name: "context_prune", execute: () => measureSummary(one, config, async () => same) });
 assert.equal(observedApi.identity(), true);
-await Promise.all([handlers.get("turn_end")({}, {}), handlers.get("message_end")({}, {})]);
+await handlers.get("turn_end")({}, {});
+await handlers.get("message_end")({}, {});
 await commands.get("pruner").handler();
 await tools.get("context_prune").execute();
 const apiLog = records(apiRecords);
-ok("event, command, and tool flush reasons stay in async context", apiLog.map((entry) => entry.flushReason).join(",") === "threshold,message_end,manual_command,context_prune_tool");
-ok("parallel callbacks produce one unique ordered record each", apiLog.length === 4 && apiLog.map((entry) => entry.sequence).join(",") === "1,2,3,4" && new Set(apiLog.map((entry) => entry.eventId)).size === 4 && apiLog.every((entry) => /^[0-9a-f-]{36}$/.test(entry.eventId)));
+ok("only explicitly evaluated flush reasons are recorded", apiLog.map((entry) => entry.flushReason).join(",") === "every_turn,message_end,manual_command,context_prune_tool");
+ok("callbacks produce one unique ordered record each", apiLog.length === 4 && apiLog.map((entry) => entry.sequence).join(",") === "1,2,3,4" && new Set(apiLog.map((entry) => entry.eventId)).size === 4 && apiLog.every((entry) => /^[0-9a-f-]{36}$/.test(entry.eventId)));
 ok("loaded artifact identity is resolved", /^[a-f0-9]{64}$/.test(apiLog[0].loadedBuildIdentity));
 
 const thrownObserver = recorder(temp("throw"));
@@ -133,7 +150,7 @@ ok("log write failure is non-fatal", afterWriteFailure === same);
 
 await handlers.get("session_tree")({}, {});
 const boundaryRecord = records(apiRecords).at(-1);
-ok("session-tree/compaction-like boundary clears prior flush context", boundaryRecord.flushReason === "unknown" && boundaryRecord.sequence === 5);
+ok("unproven event reasons are recorded as unknown, not guessed", boundaryRecord.flushReason === "unknown" && boundaryRecord.sequence === 5);
 
 for (const path of tempDirs) {
   try { rmSync(path, { recursive: true, force: true }); } catch { /* isolated test temp only */ }

@@ -2,9 +2,7 @@
 // turn_end hook and the flush loop. Keeping them here (instead of inline in
 // index.ts) makes each decision independently testable.
 import type { CapturedBatch, ContextPruneConfig } from "./types.js";
-import { recordFloorSkip } from "./observability.js";
 
-/** Marker returned by summarizeBatch() for batches below the size floor. */
 /** Marker returned by summarizeBatch() for batches below the size floor. */
 export const FLOOR_SKIPPED_MARKER = "__prunerFloorSkipped";
 
@@ -25,11 +23,13 @@ export function floorThreshold(config: ContextPruneConfig): number {
   return Number.isFinite(v) && v >= 0 ? v : 0;
 }
 
-/** OPT-025 size floor: below the threshold the batch never reaches the LLM. */
+/**
+ * OPT-025 size floor: below the threshold the batch never reaches the LLM.
+ * Pure predicate — observation happens once at the commit site in the flush
+ * loop, so repeated calls (filter + results map) cannot double-count a skip.
+ */
 export function isFloorSkippedBatch(batch: CapturedBatch, threshold: number): boolean {
-  const skipped = batchRawChars(batch) < threshold;
-  if (skipped) recordFloorSkip(batch, threshold);
-  return skipped;
+  return batchRawChars(batch) < threshold;
 }
 
 /**

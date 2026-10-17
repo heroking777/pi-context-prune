@@ -27,6 +27,8 @@ printf '\n=== REQUIRED REGRESSION TESTS ===\n'
 node tests/run.mjs
 printf '\n=== REQUIRED ISOLATED STAGING TESTS ===\n'
 node tests/staging.mjs
+printf '\n=== REQUIRED OBSERVABILITY WIRING TESTS ===\n'
+node tests/observability-wiring.mjs
 printf '\n=== OPTIONAL PHASE5 DIFFERENTIAL ===\n'
 set +e
 node tests/diff6.mjs

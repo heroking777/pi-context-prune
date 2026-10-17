@@ -27,7 +27,22 @@ const CONFIG_KEYS = [
 
 export type FlushReason =
   | "every_turn" | "threshold" | "message_end" | "manual_command"
-  | "context_prune_tool" | "tool_execution_end" | "unknown";
+  | "context_prune_tool" | "context_tag_tool" | "unknown";
+
+/**
+ * Commit outcomes observed at the flush-loop commit site. Distinct from the
+ * per-attempt `summary_api` event: one `batch_outcome` record exists per batch
+ * the loop actually processed, and it carries whether that batch reached the
+ * persisted index. A summary attempt is not proof of a committed batch.
+ */
+export type BatchCommitOutcome =
+  | "summarized" | "skipped-oversized" | "skipped-size-floor"
+  | "rate-limited" | "credit-exhausted" | "failed";
+
+export interface BatchCommitInfo {
+  indexPersisted: boolean;
+  threshold?: number;
+}
 
 export interface ObservationContext {
   reason: FlushReason;
@@ -117,10 +132,18 @@ export class MetadataObserver {
     this.append(this.makeRecord(batch, config, outcomeOf(result, threw), latencyMs, usage, context));
   }
 
-  recordFloorSkip(batch: CapturedBatch, threshold: number, context: ObservationContext | undefined): void {
+  recordBatchOutcome(
+    batch: CapturedBatch,
+    outcome: BatchCommitOutcome,
+    info: BatchCommitInfo,
+    context: ObservationContext | undefined,
+  ): void {
     if (!this.enabled) return;
     const config = context?.config ?? null;
-    this.append(this.makeRecord(batch, config, "skipped-size-floor", 0, null, context, threshold));
+    const record = this.makeRecord(batch, config, outcome, null, null, context, info.threshold);
+    record.event = "batch_outcome";
+    record.indexPersisted = info.indexPersisted === true;
+    this.append(record);
   }
 
   private makeRecord(
@@ -154,6 +177,7 @@ export class MetadataObserver {
       lastCallRef: callReference(batch.toolCalls[members - 1]?.toolCallId),
       batchMembershipCount: members,
       batchRawCharCount: rawChars(batch),
+      indexPersisted: null,
       outcome,
       summaryApiUsage: {
         inputTokens: safeNumber(usage?.input),

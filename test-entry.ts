@@ -55,5 +55,6 @@ export {
   withFlushObservation,
   withPendingBatchMetrics,
   instrumentExtensionAPI,
-  recordFloorSkip,
+  recordBatchOutcome,
+  runWithFlushReason,
 } from "./src/observability.js";

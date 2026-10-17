@@ -53,7 +53,7 @@ import {
 import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
-import { instrumentExtensionAPI } from "./src/observability.js";
+import { instrumentExtensionAPI, recordBatchOutcome, runWithFlushReason } from "./src/observability.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -352,6 +352,7 @@ export default function (pi: ExtensionAPI) {
           totalRawCharCount += batchRawChars(batch);
           totalToolCallCount += batch.toolCalls.length;
           floorSkippedBatches.push(batch);
+          recordBatchOutcome(batch, "skipped-size-floor", { indexPersisted: true, threshold: floor });
           processedBatches.push(batch);
           rateLimitCooldowns.clear(batch);
           continue;
@@ -363,6 +364,7 @@ export default function (pi: ExtensionAPI) {
           // stays in the session and is retried once after the cooldown expires.
           const err = (result as any).error;
           const rec = rateLimitCooldowns.record(batch, err);
+          recordBatchOutcome(batch, "rate-limited", { indexPersisted: false });
           rateLimitedCount++;
           if (firstRateLimitError === null) firstRateLimitError = err;
           safeNotify(
@@ -378,6 +380,7 @@ export default function (pi: ExtensionAPI) {
           // it is NOT restored for immediate re-send.
           const err = (result as any).error;
           const creditRec = rateLimitCooldowns.record(batch, err);
+          recordBatchOutcome(batch, "credit-exhausted", { indexPersisted: false });
           creditLimitedCount++;
           if (firstCreditError === null) firstCreditError = err;
           safeNotify(
@@ -427,8 +430,10 @@ export default function (pi: ExtensionAPI) {
               indexer.registerSummaryRefs(summaryRefs);
               persistBatchIndex(batch, appendEntry);
             }
+            recordBatchOutcome(batch, "summarized", { indexPersisted: true });
           } else {
             oversizedBatches.push(batch);
+            recordBatchOutcome(batch, "skipped-oversized", { indexPersisted: false });
           }
         } catch (err) {
           // Persistence error mid-loop: stop here, restore this and remaining batches.
@@ -442,6 +447,12 @@ export default function (pi: ExtensionAPI) {
 
         processedBatches.push(batch);
         rateLimitCooldowns.clear(batch);
+      }
+
+      // Observe the first failed batch (the loop stops at the first null
+      // result; later batches were never attempted so they are not recorded).
+      if (firstFailureIndex >= 0) {
+        recordBatchOutcome(batches[firstFailureIndex], "failed", { indexPersisted: false });
       }
 
       // Restore unprocessed batches (those at and after the first failure)
@@ -626,7 +637,7 @@ export default function (pi: ExtensionAPI) {
     pendingBatches.push(batch);
 
     if (currentConfig.value.pruneOn === "every-turn") {
-      await flushPending(ctx, { delivery: "session" });
+      await runWithFlushReason("every_turn", () => flushPending(ctx, { delivery: "session" }));
     } else {
       // AI-INPUT-CONTEXT-OPT-001: mid-task auto-prune. Reuses the exact runtime
       // delivery path the context_prune tool uses (summarize -> steer summary ->
@@ -634,7 +645,7 @@ export default function (pi: ExtensionAPI) {
       // request). Only fires inside the tool loop while this user task is still
       // running, so the agent continues with compact state.
       if (shouldMidTaskAutoPrune(currentConfig.value, pendingBatches)) {
-        await flushPending(ctx, { delivery: "runtime" });
+        await runWithFlushReason("threshold", () => flushPending(ctx, { delivery: "runtime" }));
         return;
       }
       // Let the user know a batch is queued
@@ -670,7 +681,7 @@ export default function (pi: ExtensionAPI) {
     if (!(CONTEXT_TAG_TOOL_NAMES as readonly string[]).includes(event.toolName)) return;
     if (!currentConfig.value.enabled) return;
     if (currentConfig.value.pruneOn !== "on-context-tag") return;
-    await flushPending(ctx, { delivery: "runtime" });
+    await runWithFlushReason("context_tag_tool", () => flushPending(ctx, { delivery: "runtime" }));
   });
 
   // ── message_end: flush after the final assistant response in agent-message mode ──
@@ -682,7 +693,7 @@ export default function (pi: ExtensionAPI) {
     if (!currentConfig.value.enabled) return;
     if (currentConfig.value.pruneOn !== "agent-message") return;
     if (!isFinalAssistantMessage(event.message)) return;
-    await flushPending(ctx, { delivery: "session" });
+    await runWithFlushReason("message_end", () => flushPending(ctx, { delivery: "session" }));
   });
 
   // ── agent_end: last-chance cleanup only ─────────────────────────────────────
