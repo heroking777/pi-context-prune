@@ -16,7 +16,8 @@ in-house pruner modifications under source control instead of patching the gener
   previous behaviour.
 * **Locally retained**: OPT-001 mid-task auto-prune, OPT-025 rate-limit cooldown + size
   floor, OPT-026 summarizer output cap, OPT-027/028 prompt modes, OPT-029/030 evidence
-  appendix. Full list, verification method and rollback procedure: [FORK_NOTES.md](./FORK_NOTES.md).
+  appendix. Full list and verification method: [FORK_NOTES.md](./FORK_NOTES.md).
+  Distribution, staging and rollback procedure: [DEPLOY_RESTORE.md](./DEPLOY_RESTORE.md).
 
 Rebuild (`dist/` is generated and gitignored — never hand-edit it):
 
