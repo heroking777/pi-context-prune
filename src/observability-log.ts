@@ -44,6 +44,22 @@ export interface BatchCommitInfo {
   threshold?: number;
 }
 
+/**
+ * Persistence-phase result of one flush. `batch_outcome` records prove the index
+ * side only; this record makes the frontier/stats side explicit so a flush where
+ * the index succeeded but the frontier did not persist cannot be read as a
+ * complete success.
+ */
+export interface FlushCommitInfo {
+  outcome: string;
+  frontierPersisted: boolean;
+  statsPersisted: boolean;
+  processedBatchCount: number;
+  attemptedToolCallCount: number;
+  rawCharCount: number;
+  summaryCharCount: number;
+}
+
 export interface ObservationContext {
   reason: FlushReason;
   config: ContextPruneConfig | null;
@@ -144,6 +160,27 @@ export class MetadataObserver {
     record.event = "batch_outcome";
     record.indexPersisted = info.indexPersisted === true;
     this.append(record);
+  }
+
+  recordFlushCommit(info: FlushCommitInfo, context: ObservationContext | undefined): void {
+    if (!this.enabled) return;
+    this.append({
+      schemaVersion: 1,
+      eventId: randomUUID(),
+      event: "flush_commit",
+      sequence: ++this.sequence,
+      timestamp: new Date(this.now()).toISOString(),
+      loadedBuildIdentity: this.loadedBuildIdentity,
+      effectiveConfigHash: settingsFingerprint(context?.config ?? null),
+      flushReason: context?.reason ?? "unknown",
+      outcome: info.outcome,
+      frontierPersisted: info.frontierPersisted === true,
+      statsPersisted: info.statsPersisted === true,
+      processedBatchCount: safeNumber(info.processedBatchCount),
+      attemptedToolCallCount: safeNumber(info.attemptedToolCallCount),
+      rawCharCount: safeNumber(info.rawCharCount),
+      summaryCharCount: safeNumber(info.summaryCharCount),
+    });
   }
 
   private makeRecord(

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import {
   DEFAULT_CONFIG, MetadataObserver, measureSummary, withFlushObservation,
   withPendingBatchMetrics, instrumentExtensionAPI, isFloorSkippedBatch,
-  recordBatchOutcome, runWithFlushReason,
+  recordBatchOutcome, recordFlushCommit, runWithFlushReason,
   RATE_LIMITED_MARKER, shouldMidTaskAutoPrune, summarizeBatch, makeCtx, state, ok,
 } from "./test-support.mjs";
 
@@ -77,6 +77,20 @@ await withFlushObservation("threshold", config, () => {
 }, floorOnceObserver);
 const floorRecords = records(floorOnceDir);
 ok("double predicate check yields exactly one floor commit record", floorRecords.length === 1 && floorRecords[0].event === "batch_outcome" && floorRecords[0].outcome === "skipped-size-floor" && floorRecords[0].indexPersisted === true && floorRecords[0].summaryApiUsage.inputTokens === null);
+
+// Regression: a flush whose index writes succeeded but whose frontier persist
+// failed must not be indistinguishable from a complete flush.
+const commitDir = temp("flush-commit");
+const commitObserver = recorder(commitDir);
+const commitInfo = { processedBatchCount: 2, attemptedToolCallCount: 3, rawCharCount: 40, summaryCharCount: 25 };
+withFlushObservation("message_end", config, () => {
+  recordFlushCommit({ outcome: "failed-persist", frontierPersisted: false, statsPersisted: false, ...commitInfo });
+  recordFlushCommit({ outcome: "summarized", frontierPersisted: true, statsPersisted: true, ...commitInfo });
+}, commitObserver);
+const commitRecords = records(commitDir);
+ok("flush commit distinguishes partial failure from complete persistence",
+  commitRecords.length === 2 && commitRecords[0].event === "flush_commit" && commitRecords[0].outcome === "failed-persist" && commitRecords[0].frontierPersisted === false && commitRecords[1].frontierPersisted === true && commitRecords[1].statsPersisted === true && commitRecords[1].flushReason === "message_end" && commitRecords[1].processedBatchCount === 2);
+ok("flush commit carries no raw content", !JSON.stringify(commitRecords).includes(privateValues[0]) && !JSON.stringify(commitRecords).includes("resultText"));
 
 const combinedDir = temp("mixed-flush");
 const combinedObserver = recorder(combinedDir);

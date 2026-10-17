@@ -5,12 +5,13 @@ import {
   MetadataObserver,
   type BatchCommitInfo,
   type BatchCommitOutcome,
+  type FlushCommitInfo,
   type FlushReason,
   type ObservationContext,
 } from "./observability-log.js";
 import { rawChars } from "./observability-log.js";
 export { MetadataObserver, defaultMetadataObserver } from "./observability-log.js";
-export type { BatchCommitInfo, BatchCommitOutcome, FlushReason } from "./observability-log.js";
+export type { BatchCommitInfo, BatchCommitOutcome, FlushCommitInfo, FlushReason } from "./observability-log.js";
 
 const contextStorage = new AsyncLocalStorage<ObservationContext>();
 
@@ -88,6 +89,13 @@ export function runWithFlushReason<T>(reason: FlushReason, action: () => T): T {
   const context = contextStorage.getStore();
   if (!context?.observer.enabled) return action();
   return contextStorage.run({ ...context, reason }, action);
+}
+
+/** Records the persistence-phase result of the flush (index vs frontier/stats). */
+export function recordFlushCommit(info: FlushCommitInfo): void {
+  const context = contextStorage.getStore();
+  const observer = context?.observer ?? defaultMetadataObserver;
+  try { observer.recordFlushCommit(info, context); } catch { /* non-fatal */ }
 }
 
 function wrapHandler(

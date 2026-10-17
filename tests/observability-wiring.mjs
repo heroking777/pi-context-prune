@@ -53,6 +53,10 @@ const sessionEntries = [
   },
 ];
 
+let failFrontier = false;
+const guardFrontier = (type) => {
+  if (failFrontier && type === "context-prune-frontier") throw new Error("WIRING_HARNESS: simulated frontier persist failure");
+};
 const pi = {
   registerTool: () => {},
   registerCommand: () => {},
@@ -60,7 +64,7 @@ const pi = {
   on: (name, handler) => { handlers[name] = handler; },
   getActiveTools: () => ["read", "bash"],
   setActiveTools: () => {},
-  appendEntry: (type, data) => { appended.push({ type, data }); sessionEntries.push({ type: "custom", customType: type, data }); },
+  appendEntry: (type, data) => { guardFrontier(type); appended.push({ type, data }); sessionEntries.push({ type: "custom", customType: type, data }); },
   sendMessage: (message) => { sent.push(message); },
 };
 const ctx = {
@@ -77,7 +81,8 @@ const ctx = {
   sessionManager: {
     getEntries: () => sessionEntries,
     getBranch: () => sessionEntries,
-    appendCustomEntry: (t, d) => { appended.push({ type: t, data: d }); sessionEntries.push({ type: "custom", customType: t, data: d }); },
+    appendCustomEntry: (t, d) => { guardFrontier(t); appended.push({ type: t, data: d }); sessionEntries.push({ type: "custom", customType: t, data: d }); return `entry-${appended.length}`; },
+    appendCustomMessageEntry: (t, content, display, details) => { appended.push({ type: t, data: { content, details } }); sessionEntries.push({ type: "custom", customType: t, data: { content, details } }); return `msg-${appended.length}`; },
   },
   setActiveTools: () => {},
 };
@@ -120,6 +125,37 @@ ok("commit aligns with one advanced frontier", frontierEntries.length === 1, `fr
 ok("index entry contains the captured call and no observable-only fields", JSON.stringify(indexEntries[0]?.data).includes("wiring-tc-1") && !JSON.stringify(indexEntries[0]?.data).includes("indexPersisted"));
 ok("new lifecycle appends are index + frontier + stats only", newAppends.every((type) => ["context-prune-index", "context-prune-frontier", "context-prune-stats"].includes(type)), newAppends.join(","));
 ok("sent messages contain no raw summary payload", sent.length === 0, JSON.stringify(sent).slice(0, 80));
+
+// Phase 24 regression: index succeeds but the frontier persist fails. The log must
+// expose the partial persistence instead of looking like a complete flush.
+const afterFirstFlush = appended.length;
+sessionEntries.push({ type: "message", message: { role: "user", content: [{ type: "text", text: "second task" }] } });
+sessionEntries.push({ type: "message", message: { role: "assistant", content: [{ type: "toolCall", id: "wiring-tc-2", name: "bash", input: { command: "true" } }] } });
+sessionEntries.push({ type: "message", message: { role: "toolResult", toolCallId: "wiring-tc-2", content: [{ type: "text", text: "tiny" }] } });
+failFrontier = true;
+await handlers["turn_end"](
+  {
+    type: "turn_end",
+    turnIndex: 2,
+    toolResults: [{ role: "toolResult", toolCallId: "wiring-tc-2", content: [{ type: "text", text: "tiny" }] }],
+    message: { role: "assistant", content: [{ type: "toolCall", id: "wiring-tc-2", name: "bash", input: { command: "true" } }] },
+  },
+  ctx,
+);
+failFrontier = false;
+
+const allRecords = logFiles.flatMap((name) =>
+  readFileSync(join(LOG_DIR, name), "utf8").trim().split("\n").filter(Boolean).map(JSON.parse),
+);
+const flushCommits = allRecords.filter((entry) => entry.event === "flush_commit");
+const indexAfter = appended.filter((entry) => entry.type === "context-prune-index");
+const frontierAfter = appended.filter((entry) => entry.type === "context-prune-frontier");
+ok("partial frontier failure still persists the index", indexAfter.length === 2 && frontierAfter.length === 1);
+ok("partial frontier failure is recorded as failed-persist",
+  flushCommits.length === 2 && flushCommits.at(-1).outcome === "failed-persist" && flushCommits.at(-1).frontierPersisted === false && flushCommits.at(-1).flushReason === "every_turn");
+ok("successful flush is recorded as fully persisted",
+  flushCommits[0].outcome === "skipped-size-floor" && flushCommits[0].frontierPersisted === true);
+ok("no raw tool text reaches any record", !JSON.stringify(allRecords).includes("tiny") && !JSON.stringify(allRecords).includes("command"));
 
 rmSync(HOME, { recursive: true, force: true });
 console.log(`  INFO wiring test: ${pass} passed, ${fail} failed; no provider/network call`);

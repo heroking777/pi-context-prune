@@ -53,7 +53,7 @@ import {
 import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
-import { instrumentExtensionAPI, recordBatchOutcome, runWithFlushReason } from "./src/observability.js";
+import { instrumentExtensionAPI, recordBatchOutcome, recordFlushCommit, runWithFlushReason } from "./src/observability.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -489,23 +489,38 @@ export default function (pi: ExtensionAPI) {
         outcome: allOversized ? "skipped-oversized" : allFloorSkipped ? "skipped-size-floor" : "summarized",
       };
 
+      const commitOutcome = allOversized ? "skipped-oversized" : allFloorSkipped ? "skipped-size-floor" : "summarized";
+      const commitInfo = {
+        processedBatchCount: processedBatches.length,
+        attemptedToolCallCount: totalToolCallCount,
+        rawCharCount: totalRawCharCount,
+        summaryCharCount: totalSummaryCharCount,
+      };
+      let frontierPersisted = false;
+      let statsPersisted = false;
       try {
         if (delivery === "runtime") {
           frontier.advance(frontierSnapshot);
           frontier.persist(pi);
+          frontierPersisted = true;
           statsAccum.persist(pi);
+          statsPersisted = true;
         } else {
           frontier.advance(frontierSnapshot);
           appendEntry(CUSTOM_TYPE_FRONTIER, frontierSnapshot);
+          frontierPersisted = true;
           try {
             appendEntry(CUSTOM_TYPE_STATS, statsAccum.getStats());
+            statsPersisted = true;
           } catch {
             // Ignore stats persistence failures; the prune result and frontier are the contract.
           }
         }
       } catch (err) {
+        recordFlushCommit({ outcome: "failed-persist", frontierPersisted, statsPersisted, ...commitInfo });
         return { ok: false, reason: isStaleContextError(err) ? "stale-context" : "failed", error: errorMessage(err) };
       }
+      recordFlushCommit({ outcome: commitOutcome, frontierPersisted, statsPersisted, ...commitInfo });
 
       setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
 

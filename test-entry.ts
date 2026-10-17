@@ -56,5 +56,6 @@ export {
   withPendingBatchMetrics,
   instrumentExtensionAPI,
   recordBatchOutcome,
+  recordFlushCommit,
   runWithFlushReason,
 } from "./src/observability.js";
