@@ -52,10 +52,15 @@ export function normalizeSummaryToolCallRefs(details: unknown): SummaryToolCallR
 }
 
 export function formatSummaryToolCallRefs(refs: SummaryToolCallRef[]): string {
+  const searchHint =
+    "Other pruned outputs not listed here can be found by keyword with `context_index_search`.";
+  if (refs.length === 0) {
+    return `\n\n---\n${searchHint}`;
+  }
   const refList = refs.map((ref) => `\`${ref.shortId}\``).join(", ");
   return (
     `\n\n---\n**Summarized tool refs**: ${refList}\n` +
-    `Use \`context_tree_query\` with these refs to retrieve the original full outputs.`
+    `Use \`context_tree_query\` with these refs to retrieve the original full outputs. ${searchHint}`
   );
 }
 

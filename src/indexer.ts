@@ -7,9 +7,20 @@ import {
   type SummaryToolCallRef,
 } from "./summary-refs.js";
 
+export interface IndexSearchOptions {
+  limit?: number;
+  errorsOnly?: boolean;
+}
+
+export interface IndexSearchResult {
+  records: ToolCallRecord[];
+  matchCount: number;
+}
+
 export class ToolCallIndexer {
   private index = new Map<string, ToolCallRecord>();
   private aliasToToolCallId = new Map<string, string>();
+  private toolCallIdToAlias = new Map<string, string>();
   private nextShortAliasNumber = 1;
 
   /**
@@ -19,6 +30,7 @@ export class ToolCallIndexer {
   reconstructFromSession(ctx: ExtensionContext): void {
     this.index.clear();
     this.aliasToToolCallId.clear();
+    this.toolCallIdToAlias.clear();
     this.nextShortAliasNumber = 1;
 
     const branch = ctx.sessionManager.getBranch();
@@ -63,6 +75,7 @@ export class ToolCallIndexer {
       if (!ref.shortId || !ref.toolCallId) continue;
       if (ref.shortId !== ref.toolCallId) {
         this.aliasToToolCallId.set(ref.shortId, ref.toolCallId);
+        this.toolCallIdToAlias.set(ref.toolCallId, ref.shortId);
       }
       const match = /^t(\d+)$/.exec(ref.shortId);
       if (match) {
@@ -111,6 +124,33 @@ export class ToolCallIndexer {
       }
     }
     return results;
+  }
+
+  /**
+   * Returns the model-visible short ref for a tool call, if one was allocated.
+   */
+  getShortId(toolCallId: string): string | undefined {
+    return this.toolCallIdToAlias.get(toolCallId);
+  }
+
+  /**
+   * Keyword search over indexed tool calls. Matching may read result text and
+   * args, but callers only receive safe metadata (no raw output) so search can
+   * neither leak secrets nor fabricate records that are not indexed.
+   */
+  searchRecords(query: string, options: IndexSearchOptions = {}): IndexSearchResult {
+    const needle = query.trim().toLowerCase();
+    const limit = Math.min(Math.max(options.limit ?? 5, 1), 20);
+    const matches: ToolCallRecord[] = [];
+    for (const record of this.index.values()) {
+      if (options.errorsOnly && !record.isError) continue;
+      if (needle) {
+        const haystack = `${record.toolName}\n${JSON.stringify(record.args ?? {})}\n${record.resultText}`.toLowerCase();
+        if (!haystack.includes(needle)) continue;
+      }
+      matches.push(record);
+    }
+    return { records: matches.slice(0, limit), matchCount: matches.length };
   }
 
   /**

@@ -26,6 +26,7 @@ writeFileSync(join(SETTINGS_DIR, "settings.json"), JSON.stringify({
   showStartupNotice: false,
 }));
 
+const FLOOR_RAW = "tiny payload SECRET_MARKER_ZZZ";
 let pass = 0;
 let fail = 0;
 const ok = (name, condition, extra = "") => {
@@ -49,7 +50,7 @@ const sessionEntries = [
   },
   {
     type: "message",
-    message: { role: "toolResult", toolCallId: "wiring-tc-1", content: [{ type: "text", text: "tiny" }] },
+    message: { role: "toolResult", toolCallId: "wiring-tc-1", content: [{ type: "text", text: FLOOR_RAW }] },
   },
 ];
 
@@ -57,8 +58,9 @@ let failFrontier = false;
 const guardFrontier = (type) => {
   if (failFrontier && type === "context-prune-frontier") throw new Error("WIRING_HARNESS: simulated frontier persist failure");
 };
+const tools = new Map();
 const pi = {
-  registerTool: () => {},
+  registerTool: (tool) => { tools.set(tool.name, tool); },
   registerCommand: () => {},
   registerMessageRenderer: () => {},
   on: (name, handler) => { handlers[name] = handler; },
@@ -95,7 +97,7 @@ await handlers["turn_end"](
   {
     type: "turn_end",
     turnIndex: 1,
-    toolResults: [{ role: "toolResult", toolCallId: "wiring-tc-1", content: [{ type: "text", text: "tiny" }] }],
+    toolResults: [{ role: "toolResult", toolCallId: "wiring-tc-1", content: [{ type: "text", text: FLOOR_RAW }] }],
     message: {
       role: "assistant",
       content: [{ type: "toolCall", id: "wiring-tc-1", name: "bash", input: { command: "true" } }],
@@ -125,6 +127,14 @@ ok("commit aligns with one advanced frontier", frontierEntries.length === 1, `fr
 ok("index entry contains the captured call and no observable-only fields", JSON.stringify(indexEntries[0]?.data).includes("wiring-tc-1") && !JSON.stringify(indexEntries[0]?.data).includes("indexPersisted"));
 ok("new lifecycle appends are index + frontier + stats only", newAppends.every((type) => ["context-prune-index", "context-prune-frontier", "context-prune-stats"].includes(type)), newAppends.join(","));
 ok("sent messages contain no raw summary payload", sent.length === 0, JSON.stringify(sent).slice(0, 80));
+
+// Phase 26: a size-floor batch has no visible ref, so it must be discoverable by keyword.
+const searchResult = await tools.get("context_index_search").execute("s", { query: "SECRET_MARKER_ZZZ" }, undefined, undefined, ctx);
+const searchText = searchResult.content.map((part) => part.text).join("\n");
+ok("ref-less search finds the size-floor call", searchText.includes("wiring-tc-1") && searchText.includes(`bytes: ${FLOOR_RAW.length}`));
+ok("ref-less search returns metadata, not the raw output", !searchText.includes("tiny payload"));
+const retrieveResult = await tools.get("context_tree_query").execute("r", { toolCallIds: ["wiring-tc-1"] }, undefined, undefined, ctx);
+ok("discovered id retrieves the original output", retrieveResult.content.map((part) => part.text).join("\n").includes(FLOOR_RAW));
 
 // Phase 24 regression: index succeeds but the frontier persist fails. The log must
 // expose the partial persistence instead of looking like a complete flush.

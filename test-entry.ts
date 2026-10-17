@@ -49,6 +49,10 @@ export {
   shouldMidTaskAutoPrune,
 } from "./src/flush-policy.js";
 export { serializeBatchForSummarizer } from "./src/batch-capture.js";
+export { ToolCallIndexer } from "./src/indexer.js";
+export { registerIndexSearchTool } from "./src/index-search-tool.js";
+export { registerQueryTool } from "./src/query-tool.js";
+export { formatSummaryToolCallRefs } from "./src/summary-refs.js";
 export {
   MetadataObserver,
   measureSummary,

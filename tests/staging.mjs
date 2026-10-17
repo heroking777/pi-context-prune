@@ -61,6 +61,7 @@ try { mod.default(makePi()); } catch (e) { registerError = e; }
 ok("default(pi) registers without throwing", registerError === null, String(registerError));
 ok("registers the context_prune tool", rec.tools.includes("context_prune"), rec.tools.join(","));
 ok("registers the context_tree_query tool (restore path)", rec.tools.includes("context_tree_query"), rec.tools.join(","));
+ok("registers the context_index_search tool (ref-less discovery)", rec.tools.includes("context_index_search"), rec.tools.join(","));
 ok("registers the /pruner command with a handler", rec.commands.some((c) => c.name === "pruner" && c.hasHandler), JSON.stringify(rec.commands));
 ok("registers the context-prune-summary message renderer", rec.renderers.includes("context-prune-summary"), rec.renderers.join(","));
 const wantEvents = ["session_start", "session_tree", "turn_end", "tool_execution_end", "message_end", "agent_end", "context", "before_agent_start"];

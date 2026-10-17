@@ -21,6 +21,7 @@ import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
 import { registerQueryTool } from "./src/query-tool.js";
+import { registerIndexSearchTool } from "./src/index-search-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, wrapSummaryForContext } from "./src/summary-refs.js";
 import { formatEvidenceAppendix } from "./src/evidence-appendix.js";
@@ -770,6 +771,9 @@ export default function (pi: ExtensionAPI) {
 
   // ── Register context_tree_query tool ──────────────────────────────────────
   registerQueryTool(pi, indexer);
+
+  // ── Register context_index_search tool (explicit lookup without a ref) ────
+  registerIndexSearchTool(pi, indexer);
 
   // ── Register context_prune tool (always registered, activated only in agentic-auto mode) ──
   registerContextPruneTool(pi, (ctx, options) => flushPending(ctx, { delivery: "runtime", ...options }));

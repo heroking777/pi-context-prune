@@ -8,7 +8,9 @@ export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizeBatch
   formatEvidenceAppendix: _fmt, extractEvidenceAppendix: _ext, safeToolCallText: _safe,
   MetadataObserver, measureSummary, withFlushObservation, withPendingBatchMetrics,
   instrumentExtensionAPI, recordBatchOutcome, recordFlushCommit, runWithFlushReason,
-  isFloorSkippedBatch, RATE_LIMITED_MARKER, shouldMidTaskAutoPrune } = api;
+  isFloorSkippedBatch, RATE_LIMITED_MARKER, shouldMidTaskAutoPrune,
+  ToolCallIndexer, registerIndexSearchTool, registerQueryTool,
+  formatSummaryToolCallRefs, CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY } = api;
 export const { mappedReasoningEffort } = await import("./provider-contract.mjs");
 export const state = { pass: 0, fail: 0 };
 export const ok = (name, cond, extra = "") => {
