@@ -18,6 +18,7 @@ import {
   isRateLimitFailure,
   type PrunerMarkerResult,
 } from "./rate-limit.js";
+import { measureSummary, withPendingBatchMetrics } from "./observability.js";
 
 /** Result of a single summarizeBatch call: a summary, a control marker, or null (failure). */
 export type SummarizeOutcome = SummarizeResult | PrunerMarkerResult | FloorSkippedResult | null;
@@ -83,7 +84,7 @@ function receivedTextChars(message: AssistantMessage): number {
  * Summarizes a captured batch. Returns formatted markdown string, or null on failure.
  * Shows user-visible errors via ctx.ui.notify.
  */
-export async function summarizeBatch(
+async function summarizeBatchImpl(
   batch: CapturedBatch,
   config: ContextPruneConfig,
   ctx: ExtensionContext,
@@ -227,6 +228,15 @@ export async function summarizeBatch(
   }
 }
 
+export function summarizeBatch(
+  batch: CapturedBatch,
+  config: ContextPruneConfig,
+  ctx: ExtensionContext,
+  options: SummarizeBatchOptions = {},
+): Promise<SummarizeOutcome> {
+  return measureSummary(batch, config, () => summarizeBatchImpl(batch, config, ctx, options));
+}
+
 /**
  * Summarizes multiple captured batches — one LLM call per batch, run in parallel.
  *
@@ -250,17 +260,17 @@ export async function summarizeBatches(
   // Single batch — delegate to the single-batch path (no extra overhead)
   if (batches.length === 1) {
     return [
-      await summarizeBatch(batches[0], config, ctx, {
+      await withPendingBatchMetrics(batches, () => summarizeBatch(batches[0], config, ctx, {
         signal: options.signal,
         onTextProgress: (receivedChars) => {
           options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
         },
-      }),
+      })),
     ];
   }
 
   // Multiple batches — run in parallel; each produces its own SummarizeResult
-  return Promise.all(
+  return withPendingBatchMetrics(batches, () => Promise.all(
     batches.map((batch, index) =>
       summarizeBatch(batch, config, ctx, {
         signal: options.signal,
@@ -269,5 +279,5 @@ export async function summarizeBatches(
         },
       })
     )
-  );
+  ));
 }

@@ -2,6 +2,7 @@
 // turn_end hook and the flush loop. Keeping them here (instead of inline in
 // index.ts) makes each decision independently testable.
 import type { CapturedBatch, ContextPruneConfig } from "./types.js";
+import { recordFloorSkip } from "./observability.js";
 
 /** Marker returned by summarizeBatch() for batches below the size floor. */
 /** Marker returned by summarizeBatch() for batches below the size floor. */
@@ -26,7 +27,9 @@ export function floorThreshold(config: ContextPruneConfig): number {
 
 /** OPT-025 size floor: below the threshold the batch never reaches the LLM. */
 export function isFloorSkippedBatch(batch: CapturedBatch, threshold: number): boolean {
-  return batchRawChars(batch) < threshold;
+  const skipped = batchRawChars(batch) < threshold;
+  if (skipped) recordFloorSkip(batch, threshold);
+  return skipped;
 }
 
 /**

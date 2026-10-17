@@ -5,7 +5,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const api = await import(join(here, ".test-work", "testable.mjs"));
 export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizeBatch, loadConfig,
   DEFAULT_CONFIG, SYSTEM_PROMPT, SYSTEM_PROMPT_CONCISE, SYSTEM_PROMPT_FAITHFUL,
-  formatEvidenceAppendix: _fmt, extractEvidenceAppendix: _ext, safeToolCallText: _safe } = api;
+  formatEvidenceAppendix: _fmt, extractEvidenceAppendix: _ext, safeToolCallText: _safe,
+  MetadataObserver, measureSummary, withFlushObservation, withPendingBatchMetrics,
+  instrumentExtensionAPI, recordFloorSkip, isFloorSkippedBatch, RATE_LIMITED_MARKER,
+  shouldMidTaskAutoPrune } = api;
 export const { mappedReasoningEffort } = await import("./provider-contract.mjs");
 export const state = { pass: 0, fail: 0 };
 export const ok = (name, cond, extra = "") => {

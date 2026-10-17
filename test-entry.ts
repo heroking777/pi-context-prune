@@ -49,3 +49,11 @@ export {
   shouldMidTaskAutoPrune,
 } from "./src/flush-policy.js";
 export { serializeBatchForSummarizer } from "./src/batch-capture.js";
+export {
+  MetadataObserver,
+  measureSummary,
+  withFlushObservation,
+  withPendingBatchMetrics,
+  instrumentExtensionAPI,
+  recordFloorSkip,
+} from "./src/observability.js";
