@@ -55,6 +55,7 @@ import { StatsAccumulator } from "./src/stats.js";
 import { registerContextPruneTool } from "./src/context-prune-tool.js";
 import { PruneFrontierTracker } from "./src/frontier.js";
 import { instrumentExtensionAPI, recordBatchOutcome, recordFlushCommit, runWithFlushReason } from "./src/observability.js";
+import { PROTECTION_FAILURE_MARKER } from "./src/summary-protection.js";
 
 export default function (pi: ExtensionAPI) {
   // Shared mutable config reference — updated by /pruner commands
@@ -296,7 +297,8 @@ export default function (pi: ExtensionAPI) {
           });
           results[i] = r;
           const marker = r && ((r as any)[RATE_LIMITED_MARKER] || (r as any)[CREDIT_EXHAUSTED_MARKER]);
-          options.onProgress(i, batches.length, batches[i], marker ? "skipped" : r ? "done" : "skipped");
+          const protected_failed = r && (r as any)[PROTECTION_FAILURE_MARKER];
+          options.onProgress(i, batches.length, batches[i], marker || protected_failed ? "skipped" : r ? "done" : "skipped");
         }
       } else if (llmBatches.length > 0) {
         // Parallel — one LLM call per batch, all in flight simultaneously.
@@ -327,6 +329,10 @@ export default function (pi: ExtensionAPI) {
       for (let i = 0; i < batches.length; i++) {
         const result = results[i];
         if (!result) {
+          firstFailureIndex = i;
+          break;
+        }
+        if ((result as any)[PROTECTION_FAILURE_MARKER]) {
           firstFailureIndex = i;
           break;
         }

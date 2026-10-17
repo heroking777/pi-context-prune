@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { CapturedBatch, ContextPruneConfig } from "./types.js";
 import { CREDIT_EXHAUSTED_MARKER, RATE_LIMITED_MARKER } from "./rate-limit.js";
+import { PROTECTION_FAILURE_MARKER } from "./summary-protection.js";
 
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const RETENTION_DAYS = 7;
@@ -116,6 +117,9 @@ function outcomeOf(result: unknown, threw: boolean): string {
   if (typeof result !== "object") return "unknown";
   const value = result as Record<string, unknown>;
   if (value.__prunerFloorSkipped === true) return "skipped-size-floor";
+  if (value[PROTECTION_FAILURE_MARKER] === true) {
+    return (value as { reason?: string }).reason === "overflow" ? "protection-overflow" : "protection-failed";
+  }
   if (value[RATE_LIMITED_MARKER] === true) return "rate-limited";
   if (value[CREDIT_EXHAUSTED_MARKER] === true) return "credit-exhausted";
   return "summarized";

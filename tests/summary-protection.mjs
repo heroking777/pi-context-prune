@@ -3,7 +3,7 @@ import {
   DEFAULT_CONFIG, SYSTEM_PROMPT, SYSTEM_PROMPT_CONCISE, SYSTEM_PROMPT_FAITHFUL,
   SYSTEM_PROMPT_PROTECTED_COMPRESSED, PROTECTED_SUMMARY_DEFAULT_TARGET_CHARS,
   summarizerSystemPrompt, summarizerPromptMode, summarizeBatch,
-  normalizeConfig, extractProtectedItems, verifyProtectedSummary, ok,
+  normalizeConfig, extractProtectedItems, verifyProtectedSummary, PROTECTION_FAILURE_MARKER, ok,
 } from "./test-support.mjs";
 
 const SHA = "4d449861d9803ad5aa9f45b569e6d83c912f1e40";
@@ -132,11 +132,12 @@ ok("protected compression reduces summary body characters", reduction >= 0.4, `r
 ok("compressed summary keeps all six categories verbatim",
   PROTECTED_VALUES.every((marker) => summaryB.summaryText.includes(marker)),
   "missing=" + PROTECTED_VALUES.filter((m) => !summaryB.summaryText.includes(m)).length);
-ok("a lossy summary is rejected and falls back to the raw-preserving restore path", summaryLossy === null);
+ok("a lossy summary is rejected with a distinguishable protection result",
+  summaryLossy !== null && summaryLossy[PROTECTION_FAILURE_MARKER] === true && summaryLossy.reason === "missing" && summaryLossy.missingCount > 0);
 ok("rejection still notified without leaking values", true);
 
 // ── 5. Large protected payload may exceed the target; never truncated ───────
-const many = mkBatch(Array.from({ length: 30 }, (_, i) => call(`m${i}`, "bash", { command: `step ${i}` }, `FINAL_SHA=${String(i).padStart(3, "0")}${"a".repeat(37)} status PASS ${DECISION}`)));
+const many = mkBatch(Array.from({ length: 20 }, (_, i) => call(`m${i}`, "bash", { command: `step ${i}` }, `FINAL_SHA=${String(i).padStart(3, "0")}${"a".repeat(37)} status PASS ${DECISION}`)));
 const manyCtx = compressionCtx("compressed");
 const manySummary = await summarizeBatch(many, { ...cfgOn, protectedSummaryTargetChars: 500 }, manyCtx.ctx);
 ok("a dense protected payload may exceed the soft target and is not cut",

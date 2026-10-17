@@ -8,6 +8,8 @@ export { default } from "./index.js";
 export {
   summarizeBatch,
   summarizeBatches,
+  protectionFailureCount,
+  clearProtectionFailures,
   summarizerThinkingOptions,
   resolveModel,
   type SummarizeOutcome,
@@ -23,8 +25,11 @@ export {
 } from "./src/summarizer-prompts.js";
 export {
   extractProtectedItems,
+  extractProtectedItemsDetailed,
   verifyProtectedSummary,
   protectionSignature,
+  protectionFailureKey,
+  PROTECTION_FAILURE_MARKER,
 } from "./src/summary-protection.js";
 export { loadConfig, saveConfig, normalizeConfig, SETTINGS_PATH } from "./src/config.js";
 export {

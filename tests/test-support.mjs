@@ -7,6 +7,8 @@ export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizerProm
   DEFAULT_CONFIG, SYSTEM_PROMPT, SYSTEM_PROMPT_CONCISE, SYSTEM_PROMPT_FAITHFUL,
   SYSTEM_PROMPT_PROTECTED_COMPRESSED, PROTECTED_SUMMARY_DEFAULT_TARGET_CHARS,
   extractProtectedItems, verifyProtectedSummary, protectionSignature,
+  extractProtectedItemsDetailed, protectionFailureKey, PROTECTION_FAILURE_MARKER,
+  protectionFailureCount, clearProtectionFailures,
   formatEvidenceAppendix: _fmt, extractEvidenceAppendix: _ext, safeToolCallText: _safe,
   MetadataObserver, measureSummary, withFlushObservation, withPendingBatchMetrics,
   instrumentExtensionAPI, recordBatchOutcome, recordFlushCommit, runWithFlushReason,

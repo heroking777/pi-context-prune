@@ -3,14 +3,24 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type {
   CapturedBatch,
   ContextPruneConfig,
-  SummarizerThinking,
   SummarizeBatchOptions,
   SummarizeBatchesOptions,
   SummarizeResult,
 } from "./types.js";
 import { serializeBatchForSummarizer } from "./batch-capture.js";
 import { summarizerSystemPrompt } from "./summarizer-prompts.js";
-import { verifyProtectedSummary } from "./summary-protection.js";
+import { resolveModel, summarizerThinkingOptions, receivedTextChars } from "./summarizer-request.js";
+import {
+  protectionFailureKey,
+  verifyProtectedSummary,
+  getSuppressedProtectionFailure,
+  rememberProtectionFailure,
+  protectionFailureResult,
+  protectionRejectionReason,
+  protectionRejectionCategories,
+  type ProtectionFailureResult,
+} from "./summary-protection.js";
+export { protectionFailureCount, clearProtectionFailures } from "./summary-protection.js";
 import type { FloorSkippedResult } from "./flush-policy.js";
 import {
   CREDIT_EXHAUSTED_MARKER,
@@ -22,64 +32,21 @@ import {
 import { measureSummary, withPendingBatchMetrics } from "./observability.js";
 
 /** Result of a single summarizeBatch call: a summary, a control marker, or null (failure). */
-export type SummarizeOutcome = SummarizeResult | PrunerMarkerResult | FloorSkippedResult | null;
+export type SummarizeOutcome =
+  | SummarizeResult
+  | PrunerMarkerResult
+  | FloorSkippedResult
+  | ProtectionFailureResult
+  | null;
 
-export function summarizerThinkingOptions(config: ContextPruneConfig): Record<string, unknown> {
-  const level: SummarizerThinking = config.summarizerThinking;
-  if (level === "default") {
-    return {};
-  }
+// Phase32 retry-suppression state lives in ./summary-protection.ts (bounded,
+// in-memory) so this module keeps its size and responsibilities contained.
 
-  const effort = level === "off" ? undefined : level;
-  // Phase1 (AI-INPUT-CONTEXT-OPT-026): emit both option keys.
-  //   - pi-ai's openai-completions / responses streams read `reasoningEffort`
-  //   - the Command Code provider reads `reasoning`
-  //     (pi-commandcode-provider src/core.ts `mappedReasoningEffort`)
-  // `off` maps to `undefined` for both keys, which is each implementation's
-  // documented "send no reasoning parameter" (disable) path. Nothing is sent
-  // on the wire for `off`; providers without reasoning support are unaffected.
-  return { reasoning: effort, reasoningEffort: effort };
-}
-
-/**
- * Returns the model to use for summarization.
- * config.summarizerModel === "default" => ctx.model
- * "provider/model-id" => ctx.modelRegistry.find(provider, modelId), fallback to ctx.model with warning
- */
-export function resolveModel(config: ContextPruneConfig, ctx: ExtensionContext): any {
-  if (config.summarizerModel === "default") {
-    return ctx.model;
-  }
-
-  const slashIndex = config.summarizerModel.indexOf("/");
-  if (slashIndex === -1) {
-    ctx.ui.notify(
-      `pruner: invalid summarizerModel "${config.summarizerModel}", expected "provider/model-id". Falling back to default model.`,
-      "warning"
-    );
-    return ctx.model;
-  }
-
-  const provider = config.summarizerModel.slice(0, slashIndex);
-  const modelId = config.summarizerModel.slice(slashIndex + 1);
-
-  const found = ctx.modelRegistry.find(provider, modelId);
-  if (!found) {
-    ctx.ui.notify(
-      `pruner: model "${config.summarizerModel}" not found in registry. Falling back to default model.`,
-      "warning"
-    );
-    return ctx.model;
-  }
-
-  return found;
-}
-
-function receivedTextChars(message: AssistantMessage): number {
-  return message.content.reduce((sum, content) => {
-    return content.type === "text" ? sum + content.text.length : sum;
-  }, 0);
-}
+export {
+  summarizerThinkingOptions,
+  resolveModel,
+  receivedTextChars,
+} from "./summarizer-request.js";
 
 /**
  * Summarizes a captured batch. Returns formatted markdown string, or null on failure.
@@ -93,6 +60,15 @@ async function summarizeBatchImpl(
 ): Promise<SummarizeOutcome> {
   // Fast-fail if already aborted before we even start.
   if (options.signal?.aborted) throw new Error("summarizeBatch: aborted before start");
+
+  const serialized = serializeBatchForSummarizer(batch);
+  // Phase32: a batch whose compressed summary already failed protection is not
+  // re-sent on a later automatic flush while its content and policy are unchanged.
+  const protectionKey = config.protectedSummaryCompression === true ? protectionFailureKey(serialized, config) : null;
+  if (protectionKey !== null) {
+    const suppressed = getSuppressedProtectionFailure(protectionKey);
+    if (suppressed) return protectionFailureResult(protectionKey, suppressed);
+  }
 
   try {
     const model = resolveModel(config, ctx);
@@ -110,7 +86,6 @@ async function summarizeBatchImpl(
       return null;
     }
 
-    const serialized = serializeBatchForSummarizer(batch);
     const userMessage =
       summarizerSystemPrompt(config) + "\n\n<tool-call-batch>\n" + serialized + "\n</tool-call-batch>";
 
@@ -206,12 +181,14 @@ async function summarizeBatchImpl(
     if (config.protectedSummaryCompression === true) {
       const verdict = verifyProtectedSummary(serialized, llmText);
       if (!verdict.ok) {
-        const categories = [...new Set(verdict.missing.map((item) => item.category))].join(", ");
+        const reason = protectionRejectionReason(verdict);
+        if (protectionKey !== null) rememberProtectionFailure(protectionKey, reason);
+        const categories = protectionRejectionCategories(verdict);
         ctx.ui.notify(
-          `pruner: compressed summary rejected - ${verdict.missing.length} protected item(s) missing (${categories}); raw tool output kept pending`,
+          `pruner: compressed summary rejected (${reason}${categories ? `: ${categories}` : ""}); raw tool output kept pending and not retried for this batch`,
           "error",
         );
-        return null;
+        return protectionFailureResult(protectionKey ?? "", reason, verdict.missing);
       }
     }
 
