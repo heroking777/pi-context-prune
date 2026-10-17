@@ -8,8 +8,43 @@ import {
 } from "./summary-refs.js";
 
 export interface IndexSearchOptions {
-  limit?: number;
+  limit?: unknown;
   errorsOnly?: boolean;
+}
+
+/** Upper bound on a search query, so a huge query cannot force unbounded work. */
+export const MAX_SEARCH_QUERY_CHARS = 512;
+const DEFAULT_SEARCH_LIMIT = 5;
+const MAX_SEARCH_LIMIT = 20;
+
+/**
+ * Coerces any caller-supplied limit into an integer in [1, MAX_SEARCH_LIMIT].
+ * NaN, Infinity, non-numbers and out-of-range values fall back safely instead
+ * of yielding an unbounded result set.
+ */
+export function sanitizeSearchLimit(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return DEFAULT_SEARCH_LIMIT;
+  const floored = Math.floor(value);
+  if (floored < 1) return 1;
+  return Math.min(floored, MAX_SEARCH_LIMIT);
+}
+
+/**
+ * Validates a search query. Empty or whitespace-only queries are rejected so
+ * they can never be treated as "match everything", and oversized queries are
+ * rejected instead of scanned.
+ */
+export function validateSearchQuery(query: unknown):
+  | { ok: true; query: string }
+  | { ok: false; reason: "empty" | "too-long"; message: string } {
+  const text = typeof query === "string" ? query : "";
+  if (text.trim().length === 0) {
+    return { ok: false, reason: "empty", message: "A non-empty search query is required; an empty query is not treated as match-all." };
+  }
+  if (text.length > MAX_SEARCH_QUERY_CHARS) {
+    return { ok: false, reason: "too-long", message: `Search query is too long (${text.length} chars); the maximum is ${MAX_SEARCH_QUERY_CHARS}.` };
+  }
+  return { ok: true, query: text };
 }
 
 export interface IndexSearchResult {
@@ -139,15 +174,16 @@ export class ToolCallIndexer {
    * neither leak secrets nor fabricate records that are not indexed.
    */
   searchRecords(query: string, options: IndexSearchOptions = {}): IndexSearchResult {
-    const needle = query.trim().toLowerCase();
-    const limit = Math.min(Math.max(options.limit ?? 5, 1), 20);
+    const validation = validateSearchQuery(query);
+    // Defensive: an empty or oversized query never scans and never matches all.
+    if (!validation.ok) return { records: [], matchCount: 0 };
+    const needle = validation.query.trim().toLowerCase();
+    const limit = sanitizeSearchLimit(options.limit);
     const matches: ToolCallRecord[] = [];
     for (const record of this.index.values()) {
       if (options.errorsOnly && !record.isError) continue;
-      if (needle) {
-        const haystack = `${record.toolName}\n${JSON.stringify(record.args ?? {})}\n${record.resultText}`.toLowerCase();
-        if (!haystack.includes(needle)) continue;
-      }
+      const haystack = `${record.toolName}\n${JSON.stringify(record.args ?? {})}\n${record.resultText}`.toLowerCase();
+      if (!haystack.includes(needle)) continue;
       matches.push(record);
     }
     return { records: matches.slice(0, limit), matchCount: matches.length };

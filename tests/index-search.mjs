@@ -2,6 +2,7 @@
 import assert from "node:assert/strict";
 import {
   ToolCallIndexer, registerIndexSearchTool, registerQueryTool, formatSummaryToolCallRefs,
+  MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery,
   CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY, ok,
 } from "./test-support.mjs";
 
@@ -133,6 +134,51 @@ for (const [name, value] of Object.entries(CATEGORIES)) {
   ok(`category ${name}: original output retrievable`, target ? raw.includes(value) : false);
 }
 ok("floor-batch ids are discoverable even though no ref was ever published", catIndexer.getShortId("floor-sha") === undefined && (await call(catTool, { query: "FINAL_SHA" })).details.refs[0].id === "floor-sha");
+
+// 8b. Phase 28 input hardening: empty, oversized and hostile limits.
+ok("empty and whitespace queries are rejected", !validateSearchQuery("").ok && validateSearchQuery("   ").ok === false);
+ok("empty query never matches all", indexer.searchRecords("").matchCount === 0 && indexer.searchRecords("   ").matchCount === 0);
+ok("query length is bounded", !validateSearchQuery("x".repeat(MAX_SEARCH_QUERY_CHARS + 1)).ok && validateSearchQuery("x".repeat(MAX_SEARCH_QUERY_CHARS)).ok === true);
+ok("limit is coerced into 1..20", sanitizeSearchLimit(undefined) === 5 && sanitizeSearchLimit(Number.NaN) === 5 && sanitizeSearchLimit(Number.POSITIVE_INFINITY) === 5 && sanitizeSearchLimit(-7) === 1 && sanitizeSearchLimit(0) === 1 && sanitizeSearchLimit(3.7) === 3 && sanitizeSearchLimit(1e9) === 20 && sanitizeSearchLimit("5") === 5);
+const hostileLimits = [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, -5, 0, 2.9, 1e9];
+let hostileOk = true;
+for (const value of hostileLimits) {
+  const outcome = indexer.searchRecords("IntegrityError", { limit: value });
+  if (!Array.isArray(outcome.records) || outcome.records.length > 20) hostileOk = false;
+}
+ok("hostile limits never throw or return unbounded results", hostileOk);
+const emptyToolOut = await call(pi.tools.get("context_index_search"), { query: "   " });
+ok("tool reports an empty-query error clearly", textOf(emptyToolOut).includes("error") && emptyToolOut.details.error === "empty" && emptyToolOut.details.refs.length === 0);
+const longToolOut = await call(pi.tools.get("context_index_search"), { query: "y".repeat(MAX_SEARCH_QUERY_CHARS + 50) });
+ok("tool reports an oversized-query error clearly", longToolOut.details.error === "too-long" && longToolOut.details.matchCount === 0 && textOf(longToolOut).includes("too long"));
+const nanLimitOut = await call(pi.tools.get("context_index_search"), { query: "IntegrityError", limit: Number.NaN });
+ok("tool survives a NaN limit", Array.isArray(nanLimitOut.details.refs) && nanLimitOut.details.refs.length <= 20);
+
+// 8c. Phase 28 id safety: display is sanitized, retrieval stays exact.
+const SPECIAL_IDS = {
+  normal: "tc-normal-1",
+  long: `tc-${'L'.repeat(5000)}`,
+  special: "tc|bad\nid` {\"json\":true}",
+  secretId: `tc-${SECRET}-id`,
+};
+const idIndexer = new ToolCallIndexer();
+const idCalls = Object.values(SPECIAL_IDS).map((id) => ({ toolName: "bash", toolCallId: id, resultText: `payload-of-${id.length}-chars`, args: {}, isError: false }));
+idIndexer.addBatch({ turnIndex: 1, timestamp: 1, toolCalls: idCalls }, fakePi());
+const idPi = fakePi();
+registerIndexSearchTool(idPi, idIndexer);
+registerQueryTool(idPi, idIndexer);
+const idSearchOut = await call(idPi.tools.get("context_index_search"), { query: "payload-of", limit: 20 });
+const idSearchText = textOf(idSearchOut);
+ok("search returns every hostile id exactly once in details", idSearchOut.details.refs.length === 4 && idSearchOut.details.refs.every((ref) => Object.values(SPECIAL_IDS).includes(ref.id)));
+ok("displayed ids contain no delimiter or control characters", idSearchText.split("\n").filter((line) => line.startsWith("- ref:")).every((line) => line.length < 200) && !idSearchText.includes("\u0000"));
+ok("controls: display keeps the metadata shape for hostile ids", idSearchText.split("\n").filter((line) => line.startsWith("- ref:")).length === 4);
+ok("long ids are truncated for display but kept in details", idSearchText.includes("…") && idSearchOut.details.refs.some((ref) => ref.id.length > 5000));
+for (const [kind, id] of Object.entries(SPECIAL_IDS)) {
+  const retrieved = textOf(await call(idPi.tools.get("context_tree_query"), { toolCallIds: [id] }));
+  ok(`retrieval stays exact for ${kind} id`, retrieved.includes(`payload-of-${id.length}-chars`));
+}
+ok("raw result text is never echoed by search even for hostile ids", !idSearchText.includes("payload-of-"));
+ok("a secret embedded in an id is echoed only as an internal identifier", idSearchOut.details.refs.some((ref) => ref.id.includes(SECRET)));
 
 // 9. Registered tool surface.
 assert.ok(pi.tools.has("context_index_search"));

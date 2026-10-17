@@ -1,6 +1,27 @@
 import { Type } from "@sinclair/typebox";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import type { ToolCallIndexer } from "./indexer.js";
+import {
+  MAX_SEARCH_QUERY_CHARS,
+  sanitizeSearchLimit,
+  validateSearchQuery,
+  type ToolCallIndexer,
+} from "./indexer.js";
+
+const MAX_DISPLAY_ID = 80;
+
+/**
+ * Renders an id for the human-readable line without letting control characters
+ * or the `|`/backtick delimiters forge extra metadata. The exact id is always
+ * preserved in `details` so retrieval is never weakened.
+ */
+function displayId(id: string): string {
+  let cleaned = "";
+  for (const ch of id) {
+    const code = ch.codePointAt(0) ?? 0;
+    cleaned += code < 0x20 || code === 0x7f || ch === "|" || ch === "`" ? "_" : ch;
+  }
+  return cleaned.length > MAX_DISPLAY_ID ? `${cleaned.slice(0, MAX_DISPLAY_ID)}…` : cleaned;
+}
 
 const MAX_MATCHES = 20;
 
@@ -25,15 +46,22 @@ export function registerIndexSearchTool(pi: ExtensionAPI, indexer: ToolCallIndex
       "If search reports no match, the content is not in the index; do not assume it exists.",
     ],
     parameters: Type.Object({
-      query: Type.String({ description: "Keyword(s) to match against pruned tool names, arguments and output text" }),
+      query: Type.String({ maxLength: MAX_SEARCH_QUERY_CHARS, description: "Keyword(s) to match against pruned tool names, arguments and output text (non-empty, max 512 chars)" }),
       limit: Type.Optional(Type.Number({ description: `Maximum matches to return (1-${MAX_MATCHES}, default 5)` })),
       errorsOnly: Type.Optional(Type.Boolean({ description: "Only return tool calls whose result was an error" })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
-      const query = typeof params.query === "string" ? params.query : "";
+      const validation = validateSearchQuery(params.query);
+      if (!validation.ok) {
+        return {
+          content: [{ type: "text", text: `## index search error\n${validation.message}` }],
+          details: { error: validation.reason, matchCount: 0, returned: 0, refs: [] },
+        };
+      }
+      const query = validation.query;
       const { records, matchCount } = indexer.searchRecords(query, {
-        limit: params.limit,
+        limit: sanitizeSearchLimit(params.limit),
         errorsOnly: params.errorsOnly === true,
       });
 
@@ -52,7 +80,7 @@ export function registerIndexSearchTool(pi: ExtensionAPI, indexer: ToolCallIndex
         for (const record of records) {
           const ref = indexer.getShortId(record.toolCallId);
           lines.push(
-            `- ref: ${ref ?? "(none)"} | id: ${record.toolCallId} | tool: ${record.toolName} | ` +
+            `- ref: ${ref ?? "(none)"} | id: ${displayId(record.toolCallId)} | tool: ${record.toolName} | ` +
               `turn: ${record.turnIndex} | status: ${record.isError ? "ERROR" : "OK"} | bytes: ${record.resultText.length}`,
           );
         }
