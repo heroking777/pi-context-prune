@@ -6,8 +6,12 @@
     "strict": true,
     "noEmit": true,
     "skipLibCheck": true,
-    "types": ["node"],
-    "typeRoots": ["../tools/node_modules/@types"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["index.ts", "src/**/*.ts"]
+  "include": [
+    "index.ts",
+    "src/**/*.ts"
+  ]
 }
