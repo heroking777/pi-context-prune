@@ -2,6 +2,31 @@
 
 A [Pi coding-agent](https://github.com/badlogic/pi-mono) extension that **summarizes completed tool-call batches**, prunes raw tool outputs from future LLM context, and exposes a `context_tree_query` escape hatch to recover any original output on demand.
 
+## ⚠️ Local fork — `heroking777/pi-context-prune` (v1.4.0 source reconstruction)
+
+This is a **private working fork** of `championswimmer/pi-context-prune`, used to keep the
+in-house pruner modifications under source control instead of patching the generated
+`dist/index.js`.
+
+* **Branch**: `pruner-phase6-source-v1.4.0`, based on upstream tag **v1.4.0**
+  (`a5fe6973a264dc37031ba02f1a3feb85b82709ab`).
+* **Upstream `main` (v2.1.0) is deliberately not merged and must not be adopted here.**
+* **Compatibility**: Pi 0.85.1; session entry types and the refs/restore format are
+  unchanged, so existing sessions stay readable. Every locally added option defaults to the
+  previous behaviour.
+* **Locally retained**: OPT-001 mid-task auto-prune, OPT-025 rate-limit cooldown + size
+  floor, OPT-026 summarizer output cap, OPT-027/028 prompt modes, OPT-029/030 evidence
+  appendix. Full list, verification method and rollback procedure: [FORK_NOTES.md](./FORK_NOTES.md).
+
+Rebuild (`dist/` is generated and gitignored — never hand-edit it):
+
+```bash
+npm install                          # dev deps only; pi-* peers stay external
+npx tsc --noEmit -p tsconfig.json    # strict type check
+npm run build                        # -> dist/index.js (+ dist/index.js.map)
+npm run check                        # build + package check
+```
+
 ## Check out my other Pi extensions
 
 - [![pi-auto-theme](https://img.shields.io/badge/🎨_pi--auto--theme-blue?style=flat-square)](https://github.com/championswimmer/pi-auto-theme) — Auto-syncs Pi theme with OS dark/light mode.

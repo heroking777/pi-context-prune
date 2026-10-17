@@ -9,14 +9,18 @@ import type {
   SummarizeResult,
 } from "./types.js";
 import { serializeBatchForSummarizer } from "./batch-capture.js";
+import { summarizerSystemPrompt } from "./summarizer-prompts.js";
+import type { FloorSkippedResult } from "./flush-policy.js";
+import {
+  CREDIT_EXHAUSTED_MARKER,
+  RATE_LIMITED_MARKER,
+  isCreditExhaustedFailure,
+  isRateLimitFailure,
+  type PrunerMarkerResult,
+} from "./rate-limit.js";
 
-const SYSTEM_PROMPT = `You are summarizing a batch of tool calls made by an AI coding assistant.
-For each tool call provide:
-- Tool name and a one-sentence description of what it did
-- Key outcome: success/failure and the most important data returned
-- Any findings the future conversation needs to remember
-
-Keep each tool call to 1-3 bullet points. Be concise.`;
+/** Result of a single summarizeBatch call: a summary, a control marker, or null (failure). */
+export type SummarizeOutcome = SummarizeResult | PrunerMarkerResult | FloorSkippedResult | null;
 
 export function summarizerThinkingOptions(config: ContextPruneConfig): Record<string, unknown> {
   const level: SummarizerThinking = config.summarizerThinking;
@@ -24,11 +28,15 @@ export function summarizerThinkingOptions(config: ContextPruneConfig): Record<st
     return {};
   }
 
-  // stream()/complete() accept provider-level options. For reasoning-capable providers,
-  // pi-ai adapters translate reasoningEffort into the provider-specific field.
-  // "off" intentionally sends no effort; adapters that support explicit disable
-  // handle that the same way as an absent effort, while preserving compatibility.
-  return { reasoningEffort: level === "off" ? undefined : level };
+  const effort = level === "off" ? undefined : level;
+  // Phase1 (AI-INPUT-CONTEXT-OPT-026): emit both option keys.
+  //   - pi-ai's openai-completions / responses streams read `reasoningEffort`
+  //   - the Command Code provider reads `reasoning`
+  //     (pi-commandcode-provider src/core.ts `mappedReasoningEffort`)
+  // `off` maps to `undefined` for both keys, which is each implementation's
+  // documented "send no reasoning parameter" (disable) path. Nothing is sent
+  // on the wire for `off`; providers without reasoning support are unaffected.
+  return { reasoning: effort, reasoningEffort: effort };
 }
 
 /**
@@ -80,7 +88,7 @@ export async function summarizeBatch(
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchOptions = {}
-): Promise<SummarizeResult | null> {
+): Promise<SummarizeOutcome> {
   // Fast-fail if already aborted before we even start.
   if (options.signal?.aborted) throw new Error("summarizeBatch: aborted before start");
 
@@ -102,7 +110,7 @@ export async function summarizeBatch(
 
     const serialized = serializeBatchForSummarizer(batch);
     const userMessage =
-      SYSTEM_PROMPT + "\n\n<tool-call-batch>\n" + serialized + "\n</tool-call-batch>";
+      summarizerSystemPrompt(config) + "\n\n<tool-call-batch>\n" + serialized + "\n</tool-call-batch>";
 
     // Use the provider-owned stream API directly. The compatibility registry
     // facade still exposes auth/header resolution, but no longer exposes a
@@ -124,6 +132,13 @@ export async function summarizeBatch(
         env: auth.env,
         signal: options.signal,
         ...summarizerThinkingOptions(config),
+        // Phase1 (AI-INPUT-CONTEXT-OPT-026): only add `maxTokens` when a positive
+        // cap is configured, so the default request is byte-identical to upstream.
+        ...(typeof config.summarizerMaxOutputTokens === "number" &&
+        Number.isInteger(config.summarizerMaxOutputTokens) &&
+        config.summarizerMaxOutputTokens > 0
+          ? { maxTokens: config.summarizerMaxOutputTokens }
+          : {}),
       }
     );
 
@@ -158,7 +173,24 @@ export async function summarizeBatch(
       throw new Error("summarizeBatch: stream stopped with reason aborted");
     }
     if (response.stopReason === "error") {
-      throw new Error(response.errorMessage ?? "Summarizer stopped with reason: error");
+      const message = response.errorMessage ?? "Summarizer stopped with reason: error";
+      const err = new Error(message);
+      // AI-INPUT-CONTEXT-OPT-025: keep the provider response on the error so
+      // 429/free-tier detection can read structured metadata (errorMessage,
+      // status fields) in addition to the message text.
+      (err as any).prunerResponse = response;
+      throw err;
+    }
+    if (response.stopReason === "length") {
+      // Phase1 (AI-INPUT-CONTEXT-OPT-026): the summarizer hit the configured
+      // output cap. Notify and return null so flushPending keeps the raw tool
+      // output pending (restore path), i.e. no summary is committed and the
+      // original content is never lost.
+      ctx.ui.notify(
+        `pruner: summarization truncated at summarizerMaxOutputTokens=${config.summarizerMaxOutputTokens}; raw tool output kept pending`,
+        "error"
+      );
+      return null;
     }
 
     const llmText = response.content
@@ -174,6 +206,19 @@ export async function summarizeBatch(
     // Propagate abort errors upward so flushPending can check signal.aborted
     // and return { ok: false, reason: "aborted" } without showing a UI error.
     if (options.signal?.aborted) throw err;
+    if (isRateLimitFailure(err)) {
+      // AI-INPUT-CONTEXT-OPT-025: 429/free-tier limit. Return a marker instead
+      // of notifying here — the caller records a per-batch cooldown and stops
+      // re-sending this batch until it expires. Other batches keep flushing.
+      return { [RATE_LIMITED_MARKER]: true, error: err instanceof Error ? err.message : String(err) };
+    }
+    if (isCreditExhaustedFailure(err)) {
+      // 400 insufficient-credits: same treatment as 429 (per-batch cooldown via
+      // the shared machinery) but a distinct marker so operators can tell credit
+      // exhaustion apart from rate limiting. Unrelated 400s fall through to the
+      // generic failure path below.
+      return { [CREDIT_EXHAUSTED_MARKER]: true, error: err instanceof Error ? err.message : String(err) };
+    }
     ctx.ui.notify(
       `pruner: summarization failed: ${err.message}`,
       "error"
@@ -200,7 +245,7 @@ export async function summarizeBatches(
   config: ContextPruneConfig,
   ctx: ExtensionContext,
   options: SummarizeBatchesOptions = {}
-): Promise<Array<SummarizeResult | null>> {
+): Promise<Array<SummarizeOutcome>> {
   if (batches.length === 0) return [];
   // Single batch — delegate to the single-batch path (no extra overhead)
   if (batches.length === 1) {

@@ -42,6 +42,43 @@ export async function loadConfig(): Promise<ContextPruneConfig> {
           : DEFAULT_CONFIG.remindUnprunedCount,
       notifySkipped:
         typeof merged.notifySkipped === "boolean" ? merged.notifySkipped : DEFAULT_CONFIG.notifySkipped,
+      // OPT-001: mid-task auto-prune.
+      midTaskAutoPrune:
+        typeof merged.midTaskAutoPrune === "boolean" ? merged.midTaskAutoPrune : DEFAULT_CONFIG.midTaskAutoPrune,
+      midTaskThresholdChars:
+        Number.isFinite(merged.midTaskThresholdChars) && merged.midTaskThresholdChars >= 0
+          ? merged.midTaskThresholdChars
+          : DEFAULT_CONFIG.midTaskThresholdChars,
+      midTaskThresholdToolCalls:
+        Number.isInteger(merged.midTaskThresholdToolCalls) && merged.midTaskThresholdToolCalls >= 1
+          ? merged.midTaskThresholdToolCalls
+          : DEFAULT_CONFIG.midTaskThresholdToolCalls,
+      // OPT-025: cooldown + size floor.
+      rateLimitCooldownMs:
+        Number.isFinite(merged.rateLimitCooldownMs) && merged.rateLimitCooldownMs >= 0
+          ? merged.rateLimitCooldownMs
+          : DEFAULT_CONFIG.rateLimitCooldownMs,
+      minRawCharsForSummary:
+        Number.isFinite(merged.minRawCharsForSummary) && merged.minRawCharsForSummary >= 0
+          ? merged.minRawCharsForSummary
+          : DEFAULT_CONFIG.minRawCharsForSummary,
+      // Phase1 (OPT-026): positive integer only, otherwise null (no cap).
+      summarizerMaxOutputTokens:
+        Number.isInteger(merged.summarizerMaxOutputTokens) && (merged.summarizerMaxOutputTokens as number) > 0
+          ? (merged.summarizerMaxOutputTokens as number)
+          : null,
+      // Phase2/Phase3 (OPT-027/028).
+      conciseSummaryMode: merged.conciseSummaryMode === true,
+      summarizerPromptMode:
+        merged.summarizerPromptMode === "concise" || merged.summarizerPromptMode === "faithful"
+          ? merged.summarizerPromptMode
+          : "default",
+      // Phase4/Phase5 (OPT-029/030).
+      evidenceAppendix: merged.evidenceAppendix === true,
+      evidenceAppendixMaxEntries:
+        Number.isInteger(merged.evidenceAppendixMaxEntries) && (merged.evidenceAppendixMaxEntries as number) > 0
+          ? (merged.evidenceAppendixMaxEntries as number)
+          : 200,
     };
   } catch {
     return { ...DEFAULT_CONFIG };

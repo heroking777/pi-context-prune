@@ -191,7 +191,41 @@ export interface ContextPruneConfig {
    *                     (all turns between two user messages are merged)
    */
   batchingMode: BatchingMode;
+  // ── OPT-001: mid-task auto-prune ─────────────────────────────────────────
+  /** Flush + summarize the pending batch from inside the tool loop (turn_end)
+   * once accumulated size/count crosses a threshold, so the next LLM request
+   * sees compact summaries + refs instead of all raw outputs. */
+  midTaskAutoPrune: boolean;
+  /** Raw tool-result chars in pendingBatches that trigger a mid-task flush. */
+  midTaskThresholdChars: number;
+  /** Pending tool-call count that triggers a mid-task flush. */
+  midTaskThresholdToolCalls: number;
+  // ── OPT-025: 429/free-tier cooldown + size floor ────────────────────────
+  /** Base per-batch cooldown after a summarizer 429/free-tier limit
+   * (exponential backoff on repeated limits, capped at 60 min). */
+  rateLimitCooldownMs: number;
+  /** Batches with fewer raw chars skip the summarizer LLM entirely and are
+   * committed via the oversized-style index + frontier path (no summary). */
+  minRawCharsForSummary: number;
+  // ── AI-INPUT-CONTEXT-OPT-026 (Phase1): optional summarizer output cap ───
+  /** null (default) preserves current behavior (model default, no cap). A
+   * positive integer is passed as `maxTokens`; a truncated response
+   * (stopReason === "length") is treated as a failure so raw output is kept. */
+  summarizerMaxOutputTokens: number | null;
+  // ── AI-INPUT-CONTEXT-OPT-027 / OPT-028 (Phase2/Phase3): prompt mode ─────
+  /** Legacy Phase2 flag: true === summarizerPromptMode "concise". */
+  conciseSummaryMode: boolean;
+  /** "default" (A) | "concise" (B) | "faithful" (C). Wins over conciseSummaryMode. */
+  summarizerPromptMode: SummarizerPromptMode;
+  // ── AI-INPUT-CONTEXT-OPT-029 / OPT-030 (Phase4/Phase5): appendix ────────
+  /** Append a mechanically extracted, verbatim identifier appendix after the
+   * model summary + refs footer. false (default) keeps current behaviour. */
+  evidenceAppendix: boolean;
+  /** Maximum appendix rows emitted across both extraction rules. */
+  evidenceAppendixMaxEntries: number;
 }
+
+export type SummarizerPromptMode = "default" | "concise" | "faithful";
 
 export const DEFAULT_CONFIG: ContextPruneConfig = {
   enabled: false,
@@ -203,6 +237,21 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   remindUnprunedCount: true,
   notifySkipped: true,
   batchingMode: "turn",
+  // OPT-001: mid-task auto-prune.
+  midTaskAutoPrune: false,
+  midTaskThresholdChars: 60000,
+  midTaskThresholdToolCalls: 12,
+  // OPT-025: per-batch 429/free-tier retry cooldown + size floor.
+  rateLimitCooldownMs: 30 * 60 * 1000,
+  minRawCharsForSummary: 10000,
+  // Phase1 (OPT-026): no output cap by default.
+  summarizerMaxOutputTokens: null,
+  // Phase2/Phase3 (OPT-027/028): prompt A by default.
+  conciseSummaryMode: false,
+  summarizerPromptMode: "default",
+  // Phase4/Phase5 (OPT-029/030): appendix off by default.
+  evidenceAppendix: false,
+  evidenceAppendixMaxEntries: 200,
 };
 
 // ── Captured batch ─────────────────────────────────────────────────────────
@@ -303,7 +352,7 @@ export interface SummarizerStats {
 }
 
 /** Outcome of the most recent completed prune attempt. */
-export type PruneFrontierOutcome = "summarized" | "skipped-oversized";
+export type PruneFrontierOutcome = "summarized" | "skipped-oversized" | "skipped-size-floor";
 
 /**
  * Snapshot of the last successfully completed prune attempt boundary.

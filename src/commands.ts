@@ -766,7 +766,11 @@ export function registerCommands(
 
           if (!result.ok) {
             const suffix = "error" in result && result.error ? ` (${result.error})` : "";
-            ctx.ui.notify(`pruner: nothing flushed — ${result.reason}${suffix}`, result.reason === "empty" ? "info" : "warning");
+            const infoReason =
+              result.reason === "empty" ||
+              result.reason === "rate-limited" ||
+              result.reason === "rate-limited-cooldown";
+            ctx.ui.notify(`pruner: nothing flushed — ${result.reason}${suffix}`, infoReason ? "info" : "warning");
             break;
           }
 

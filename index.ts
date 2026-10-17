@@ -23,7 +23,23 @@ import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminde
 import { registerQueryTool } from "./src/query-tool.js";
 import { registerCommands, setPruneStatusWidget } from "./src/commands.js";
 import { formatSummaryToolCallRefs, makeSummaryDetails, wrapSummaryForContext } from "./src/summary-refs.js";
-import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions } from "./src/types.js";
+import { formatEvidenceAppendix } from "./src/evidence-appendix.js";
+import {
+  CREDIT_EXHAUSTED_MARKER,
+  RATE_LIMITED_MARKER,
+  RateLimitRegistry,
+  rateLimitBatchKey,
+} from "./src/rate-limit.js";
+import {
+  FLOOR_SKIPPED_MARKER,
+  batchRawChars,
+  floorSkippedResult,
+  floorThreshold,
+  isFloorSkippedBatch,
+  shouldMidTaskAutoPrune,
+} from "./src/flush-policy.js";
+import type { SummarizeOutcome } from "./src/summarizer.js";
+import type { ContextPruneConfig, CapturedBatch, IndexEntryData, PruneFrontier, FlushOptions, SummarizeResult } from "./src/types.js";
 import {
   DEFAULT_CONFIG,
   CONTEXT_PRUNE_TOOL_NAME,
@@ -55,11 +71,30 @@ export default function (pi: ExtensionAPI) {
 
   // Pending batches — accumulated until the prune trigger fires
   const pendingBatches: CapturedBatch[] = [];
+  // AI-INPUT-CONTEXT-OPT-025: in-memory per-batch 429/free-tier cooldown state,
+  // keyed by sorted toolCallIds. Not persisted across process restarts
+  // (RESTART_PERSISTENCE=NO): after a restart a blocked batch is retried at
+  // most once before re-entering cooldown, so the retry loop stays bounded.
+  const rateLimitCooldowns = new RateLimitRegistry(() => currentConfig.value.rateLimitCooldownMs);
   let isFlushing = false;
 
   type FlushResult =
     | { ok: true; reason: "flushed" | "skipped-oversized"; batchCount: number; toolCallCount: number; rawCharCount: number; summaryCharCount: number }
-    | { ok: false; reason: "empty" | "already-flushing" | "summarizer-failed" | "stale-context" | "failed" | "aborted"; error?: string };
+    | {
+        ok: false;
+        reason:
+          | "empty"
+          | "already-flushing"
+          | "summarizer-failed"
+          | "stale-context"
+          | "failed"
+          | "aborted"
+          | "rate-limited"
+          | "rate-limited-cooldown"
+          | "credit-exhausted";
+        error?: string;
+        rateLimitedCount?: number;
+      };
 
   type SessionAppender = {
     appendCustomEntry(customType: string, data?: unknown): string;
@@ -88,6 +123,12 @@ export default function (pi: ExtensionAPI) {
 
   const trimBatchToPendingRange = (batch: CapturedBatch): CapturedBatch | null => {
     const currentFrontier = frontier.get();
+    // AI-INPUT-CONTEXT-OPT-025: a batch with a recorded 429/free-tier cooldown
+    // must survive the frontier trim while blocked OR awaiting its post-cooldown
+    // retry. Without this, a later successful flush would advance the frontier
+    // past its turn and the batch would never be retried (its raw results would
+    // linger un-indexed forever).
+    const rateLimited = rateLimitCooldowns.has(batch);
     let toolCalls = batch.toolCalls;
 
     // The indexer tells us what was successfully summarized earlier.
@@ -98,7 +139,7 @@ export default function (pi: ExtensionAPI) {
     // not persist index entries (e.g. skipped-oversized). When the LLM prunes in
     // the middle of a long tool chain, keep later tool calls from the same turn
     // instead of dropping the whole batch on the floor.
-    if (!currentFrontier) return { ...batch, toolCalls };
+    if (!currentFrontier || rateLimited) return { ...batch, toolCalls };
     if (batch.turnIndex < currentFrontier.lastAttemptedTurnIndex) return null;
     if (batch.turnIndex > currentFrontier.lastAttemptedTurnIndex) return { ...batch, toolCalls };
 
@@ -169,6 +210,28 @@ export default function (pi: ExtensionAPI) {
     // Bail out before we drain pendingBatches so they don't need restoring.
     if (options.signal?.aborted) return { ok: false, reason: "aborted" };
 
+    // AI-INPUT-CONTEXT-OPT-025: never re-send batches currently in 429/free-tier
+    // cooldown. They stay un-indexed in the session (raw tool results preserved);
+    // once the cooldown expires the batch is retried exactly once.
+    const now = Date.now();
+    let blockedCount = 0;
+    let firstBlockedError: string | null = null;
+    batches = batches.filter((batch) => {
+      if (!rateLimitCooldowns.isBlocked(batch, now)) return true;
+      blockedCount++;
+      const lastError = rateLimitCooldowns.lastError(batch);
+      if (firstBlockedError === null && lastError) firstBlockedError = lastError;
+      return false;
+    });
+    if (batches.length === 0) {
+      return {
+        ok: false,
+        reason: "rate-limited-cooldown",
+        rateLimitedCount: blockedCount,
+        error: firstBlockedError ?? undefined,
+      };
+    }
+
     // Draining the queue since we've captured the state via session or slice.
     // We drain BEFORE the await so concurrent calls (though guarded by isFlushing)
     // or rapid turn-ends don't result in double-summarization.
@@ -202,10 +265,25 @@ export default function (pi: ExtensionAPI) {
       // Summarize batches. When onProgress is provided (i.e. /pruner now with the
       // multi-row overlay) we process sequentially so each row can be checked off
       // as its LLM call completes. Otherwise all batches run in parallel.
-      let results: (import("./src/types.js").SummarizeResult | null)[];
+      let results: SummarizeOutcome[];
+      // OPT-025 size floor: batches below minRawCharsForSummary never reach the
+      // summarizer LLM. They are flagged here and committed via the
+      // oversized-style no-summary path in the result loop below.
+      const floor = floorThreshold(currentConfig.value);
+      const llmBatches: CapturedBatch[] = [];
+      const llmPositions: number[] = [];
+      batches.forEach((b, i) => {
+        if (!isFloorSkippedBatch(b, floor)) {
+          llmBatches.push(b);
+          llmPositions.push(i);
+        }
+      });
+      results = batches.map((b) =>
+        isFloorSkippedBatch(b, floor) ? floorSkippedResult() : null
+      );
       if (options.onProgress) {
-        results = [];
-        for (let i = 0; i < batches.length; i++) {
+        for (let k = 0; k < llmBatches.length; k++) {
+          const i = llmPositions[k];
           options.onProgress(i, batches.length, batches[i], "start");
           const r = await summarizeBatch(batches[i], currentConfig.value, ctx, {
             signal: options.signal,
@@ -213,14 +291,18 @@ export default function (pi: ExtensionAPI) {
               reportBatchTextProgress(i, batches.length, batches[i], receivedChars);
             },
           });
-          results.push(r);
-          options.onProgress(i, batches.length, batches[i], r ? "done" : "skipped");
+          results[i] = r;
+          const marker = r && ((r as any)[RATE_LIMITED_MARKER] || (r as any)[CREDIT_EXHAUSTED_MARKER]);
+          options.onProgress(i, batches.length, batches[i], marker ? "skipped" : r ? "done" : "skipped");
         }
-      } else {
+      } else if (llmBatches.length > 0) {
         // Parallel — one LLM call per batch, all in flight simultaneously.
-        results = await summarizeBatches(batches, currentConfig.value, ctx, {
+        const llmResults = await summarizeBatches(llmBatches, currentConfig.value, ctx, {
           onBatchTextProgress: reportBatchTextProgress,
           signal: options.signal,
+        });
+        llmResults.forEach((r, k) => {
+          results[llmPositions[k]] = r;
         });
       }
 
@@ -232,7 +314,12 @@ export default function (pi: ExtensionAPI) {
       let totalSummaryCharCount = 0;
       let totalToolCallCount = 0;
       const oversizedBatches: CapturedBatch[] = [];
+      const floorSkippedBatches: CapturedBatch[] = [];
       let firstFailureIndex = -1;
+      let rateLimitedCount = 0;
+      let firstRateLimitError: string | null = null;
+      let creditLimitedCount = 0;
+      let firstCreditError: string | null = null;
 
       for (let i = 0; i < batches.length; i++) {
         const result = results[i];
@@ -242,12 +329,79 @@ export default function (pi: ExtensionAPI) {
         }
 
         const batch = batches[i];
-        const batchRawCharCount = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-        const summaryRefs = indexer.allocateSummaryRefs(batch);
-        const summaryText = wrapSummaryForContext(result.summaryText + formatSummaryToolCallRefs(summaryRefs));
-        const shouldSkipOversized = summaryText.length > batchRawCharCount;
+        if ((result as any)[FLOOR_SKIPPED_MARKER]) {
+          // OPT-025 size floor: no LLM call was made. Index the full raw records
+          // via the delivery-specific success mechanism (no summary, no usage)
+          // and treat the batch as completed so the frontier advances past it
+          // exactly like an oversized skip.
+          try {
+            if (delivery === "runtime") {
+              indexer.addBatch(batch, pi);
+            } else {
+              persistBatchIndex(batch, appendEntry);
+            }
+          } catch (err) {
+            if (isStaleContextError(err)) {
+              restoreBatches(batches.slice(i));
+              break;
+            }
+            throw err;
+          }
+          totalRawCharCount += batchRawChars(batch);
+          totalToolCallCount += batch.toolCalls.length;
+          floorSkippedBatches.push(batch);
+          processedBatches.push(batch);
+          rateLimitCooldowns.clear(batch);
+          continue;
+        }
+        if ((result as any)[RATE_LIMITED_MARKER]) {
+          // AI-INPUT-CONTEXT-OPT-025: 429/free-tier limit. Record the cooldown,
+          // notify once (cooldown start), and keep the rest of the flush going.
+          // The batch is neither indexed nor restored for immediate re-send; it
+          // stays in the session and is retried once after the cooldown expires.
+          const err = (result as any).error;
+          const rec = rateLimitCooldowns.record(batch, err);
+          rateLimitedCount++;
+          if (firstRateLimitError === null) firstRateLimitError = err;
+          safeNotify(
+            ctx,
+            `pruner: summarizer rate-limited (${err}) — retries paused for this batch ~${Math.max(1, Math.round(rec.cooldownMs / 60000))} min`,
+            "warning"
+          );
+          continue;
+        }
+        if ((result as any)[CREDIT_EXHAUSTED_MARKER]) {
+          // 400 insufficient-credits: shared per-batch cooldown machinery,
+          // distinct operator signal. Batch stays pending until cooldown expiry;
+          // it is NOT restored for immediate re-send.
+          const err = (result as any).error;
+          const creditRec = rateLimitCooldowns.record(batch, err);
+          creditLimitedCount++;
+          if (firstCreditError === null) firstCreditError = err;
+          safeNotify(
+            ctx,
+            `pruner: summarizer credit exhausted (${err}) — retries paused for this batch ~${Math.max(1, Math.round(creditRec.cooldownMs / 60000))} min`,
+            "warning"
+          );
+          continue;
+        }
+        const summaryResult = result as import("./src/types.js").SummarizeResult;
 
-        statsAccum.add(result.usage);
+        const batchRawCharCount = batchRawChars(batch);
+        const summaryRefs = indexer.allocateSummaryRefs(batch);
+        // Phase4: the oversized guard keeps its original semantics (model summary
+        // + refs vs raw output), so the deterministic appendix can never change
+        // whether a summary is committed or skipped. The appendix carries its own
+        // raw-relative size budget instead (see formatEvidenceAppendix).
+        const modelSummaryText = summaryResult.summaryText + formatSummaryToolCallRefs(summaryRefs);
+        const shouldSkipOversized = modelSummaryText.length > batchRawCharCount;
+        const appendix =
+          currentConfig.value.evidenceAppendix === true
+            ? formatEvidenceAppendix(batch.toolCalls, currentConfig.value, batchRawCharCount)
+            : "";
+        const summaryText = wrapSummaryForContext(modelSummaryText + appendix);
+
+        statsAccum.add(summaryResult.usage);
         totalRawCharCount += batchRawCharCount;
         totalSummaryCharCount += summaryText.length;
         totalToolCallCount += batch.toolCalls.length;
@@ -285,6 +439,7 @@ export default function (pi: ExtensionAPI) {
         }
 
         processedBatches.push(batch);
+        rateLimitCooldowns.clear(batch);
       }
 
       // Restore unprocessed batches (those at and after the first failure)
@@ -295,6 +450,12 @@ export default function (pi: ExtensionAPI) {
       if (processedBatches.length === 0) {
         // Nothing was persisted (all calls failed or first call failed)
         setPruneStatusWidget(ctx, currentConfig.value, statsAccum.getStats());
+        if (creditLimitedCount > 0 && rateLimitedCount === 0 && firstFailureIndex < 0) {
+          return { ok: false, reason: "credit-exhausted", rateLimitedCount: creditLimitedCount, error: firstCreditError ?? "" };
+        }
+        if (rateLimitedCount > 0 && firstFailureIndex < 0) {
+          return { ok: false, reason: "rate-limited", rateLimitedCount, error: firstRateLimitError ?? "" };
+        }
         return { ok: false, reason: "summarizer-failed" };
       }
 
@@ -302,6 +463,7 @@ export default function (pi: ExtensionAPI) {
       const lastBatch = processedBatches[processedBatches.length - 1];
       const lastTC = lastBatch.toolCalls[lastBatch.toolCalls.length - 1];
       const allOversized = oversizedBatches.length === processedBatches.length;
+      const allFloorSkipped = floorSkippedBatches.length === processedBatches.length;
       const frontierSnapshot: PruneFrontier = {
         lastAttemptedToolCallId: lastTC.toolCallId,
         lastAttemptedToolName: lastTC.toolName,
@@ -311,7 +473,7 @@ export default function (pi: ExtensionAPI) {
         attemptedToolCallCount: totalToolCallCount,
         rawCharCount: totalRawCharCount,
         summaryCharCount: totalSummaryCharCount,
-        outcome: allOversized ? "skipped-oversized" : "summarized",
+        outcome: allOversized ? "skipped-oversized" : allFloorSkipped ? "skipped-size-floor" : "summarized",
       };
 
       try {
@@ -337,7 +499,10 @@ export default function (pi: ExtensionAPI) {
       // Notify about any oversized batches that were skipped
       for (const batch of oversizedBatches) {
         const batchRaw = batch.toolCalls.reduce((s, tc) => s + tc.resultText.length, 0);
-        const batchSummaryLen = results[batches.indexOf(batch)]?.summaryText.length ?? 0;
+        // Oversized batches always carry a real SummarizeResult (markers never
+        // reach this list), so the cast is total here.
+        const oversizedOutcome = results[batches.indexOf(batch)] as SummarizeResult | null | undefined;
+        const batchSummaryLen = oversizedOutcome?.summaryText.length ?? 0;
         safeNotify(
           ctx,
           `pruner: skipped pruning turn ${batch.turnIndex} (${batch.toolCalls.length} tool call${batch.toolCalls.length === 1 ? "" : "s"}) — summary was ${batchSummaryLen} chars vs ${batchRaw} raw chars; frontier advanced past this range`,
@@ -461,6 +626,15 @@ export default function (pi: ExtensionAPI) {
     if (currentConfig.value.pruneOn === "every-turn") {
       await flushPending(ctx, { delivery: "session" });
     } else {
+      // AI-INPUT-CONTEXT-OPT-001: mid-task auto-prune. Reuses the exact runtime
+      // delivery path the context_prune tool uses (summarize -> steer summary ->
+      // index; the context hook then prunes the raw outputs from the next
+      // request). Only fires inside the tool loop while this user task is still
+      // running, so the agent continues with compact state.
+      if (shouldMidTaskAutoPrune(currentConfig.value, pendingBatches)) {
+        await flushPending(ctx, { delivery: "runtime" });
+        return;
+      }
       // Let the user know a batch is queued
       const n = pendingBatches.length;
       let trigger: string;

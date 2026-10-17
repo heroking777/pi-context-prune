@@ -154,7 +154,22 @@ export function serializeBatchForSummarizer(batch: CapturedBatch): string {
     const MAX_CHARS = 2000;
     if (resultText.length > MAX_CHARS) {
       const remaining = resultText.length - MAX_CHARS;
-      resultText = resultText.slice(0, MAX_CHARS) + ` ...[${remaining} chars truncated]`;
+      // OPT-025: keep the tail as well as the head. Summarizer-relevant evidence
+      // (final status lines, error strings, exit codes) is often at the end of a
+      // long tool result, and a head-only cut silently drops it.
+      const HEAD_CHARS = 1000;
+      const TAIL_CHARS = 1000;
+      const codePoints = Array.from(resultText);
+      let head: string;
+      let tail: string;
+      if (codePoints.length > MAX_CHARS) {
+        head = codePoints.slice(0, HEAD_CHARS).join("");
+        tail = codePoints.slice(codePoints.length - TAIL_CHARS).join("");
+      } else {
+        head = resultText.slice(0, HEAD_CHARS);
+        tail = resultText.slice(resultText.length - TAIL_CHARS);
+      }
+      resultText = head + ` ...[${remaining} chars middle truncated]... ` + tail;
     }
 
     return `Tool: ${tc.toolName}(${argsJson})\nResult (${status}): ${resultText}`;
