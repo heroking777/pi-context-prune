@@ -72,6 +72,7 @@ export {
 } from "./src/flush-policy.js";
 export { serializeBatchForSummarizer, captureBatch, captureUnindexedBatchesFromSession } from "./src/batch-capture.js";
 export { ToolCallIndexer, MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery, deriveSearchRef } from "./src/indexer.js";
+export { compactToolOutput, registerToolOutputCompaction } from "./src/tool-output-compaction.js";
 export { summarizeBatches } from "./src/summarizer-batch.js";
 export { buildProtectedCore, assembleHybridSummary } from "./src/hybrid-summary.js";
 export { parseRecords, parseRecordsStrict, expectedRecords, verifyRecords } from "./src/protected-records.js";

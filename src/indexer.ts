@@ -129,7 +129,8 @@ export class ToolCallIndexer {
    * Returns true if the given toolCallId has been summarized (exists in index).
    */
   isSummarized(toolCallId: string): boolean {
-    return this.index.has(toolCallId);
+    const record = this.index.get(toolCallId) as (ToolCallRecord & { __contextPruneRawOnly?: boolean }) | undefined;
+    return record !== undefined && record.__contextPruneRawOnly !== true;
   }
 
   /**

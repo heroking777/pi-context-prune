@@ -18,6 +18,7 @@ export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizerProm
   instrumentExtensionAPI, recordBatchOutcome, recordFlushCommit, runWithFlushReason,
   isFloorSkippedBatch, RATE_LIMITED_MARKER, shouldMidTaskAutoPrune,
   ToolCallIndexer, registerIndexSearchTool, registerQueryTool,
+  compactToolOutput, registerToolOutputCompaction,
   buildProtectedCore, assembleHybridSummary, checkMarkerSubjects, subjectAtIndex,
   parseRecords, parseRecordsStrict, expectedRecords, verifyRecords,
   serializeBatchForSummarizer, captureUnindexedBatchesFromSession,

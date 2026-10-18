@@ -19,6 +19,7 @@ import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } 
 import { summarizeBatch } from "./src/summarizer.js";
 import { summarizeBatches } from "./src/summarizer-batch.js";
 import { ToolCallIndexer } from "./src/indexer.js";
+import { registerToolOutputCompaction } from "./src/tool-output-compaction.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";
 import { registerQueryTool } from "./src/query-tool.js";
@@ -67,6 +68,7 @@ export default function (pi: ExtensionAPI) {
 
   // Shared indexer — rebuilt from session on every session_start / session_tree
   const indexer = new ToolCallIndexer();
+  registerToolOutputCompaction(pi, indexer, () => currentConfig.value.enabled);
 
   // Shared stats accumulator — tracks cumulative token/cost stats for summarizer calls
   const statsAccum = new StatsAccumulator();

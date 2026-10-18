@@ -8,15 +8,18 @@ export function registerQueryTool(pi: ExtensionAPI, indexer: ToolCallIndexer): v
     name: "context_tree_query",
     label: "Query Original Tool History",
     description:
-      "Retrieve original tool call results that have been pruned from active context. Pass the short refs from a pruner-summary message to get back the full original outputs.",
-    promptSnippet: "Retrieve original pruned tool outputs by short ref",
+      "Retrieve original tool call results by short ref. Large results are paged with startLine/lineLimit so the complete raw output remains recoverable.",
+    promptSnippet: "Retrieve original tool outputs by short ref",
     promptGuidelines: [
-      "When you need the full output of a tool call that was summarized and pruned from context, use context_tree_query with the short refs listed in the relevant pruner-summary message.",
+      "Use context_tree_query with a ref from a pruner summary or a [Raw output ref] marker to recover original tool output.",
+      "For large raw results, follow the next-page instruction with startLine and a bounded lineLimit until all pages are retrieved.",
     ],
     parameters: Type.Object({
       toolCallIds: Type.Array(Type.String({ description: "One or more short refs or tool call IDs to retrieve" }), {
         description: "List of short refs or toolCallIds to look up",
       }),
+      startLine: Type.Optional(Type.Integer({ minimum: 1, description: "1-based line offset for paged raw retrieval" })),
+      lineLimit: Type.Optional(Type.Integer({ minimum: 1, maximum: DEFAULT_MAX_LINES, description: "Maximum lines per raw page" })),
     }),
 
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -46,14 +49,23 @@ export function registerQueryTool(pi: ExtensionAPI, indexer: ToolCallIndexer): v
           "",
         ].join("\n");
 
-        const t = truncateHead(record.resultText, {
-          maxLines: DEFAULT_MAX_LINES,
+        const lines = record.resultText.split("\n");
+        const startLine = typeof params.startLine === "number" && Number.isInteger(params.startLine) && params.startLine > 0
+          ? params.startLine
+          : 1;
+        const lineLimit = typeof params.lineLimit === "number" && Number.isInteger(params.lineLimit) && params.lineLimit > 0
+          ? Math.min(params.lineLimit, DEFAULT_MAX_LINES)
+          : DEFAULT_MAX_LINES;
+        const page = lines.slice(startLine - 1).join("\n");
+        const t = truncateHead(page, {
+          maxLines: lineLimit,
           maxBytes: DEFAULT_MAX_BYTES,
         });
 
         let body = t.content;
-        if (t.truncated) {
-          body += `\n[Output truncated: ${t.outputLines}/${t.totalLines} lines shown]`;
+        const nextLine = startLine + t.outputLines;
+        if (t.truncated || nextLine <= lines.length) {
+          body += `\n[Raw page: lines ${startLine}-${nextLine - 1} of ${lines.length}; retrieve next page with startLine=${nextLine}.]`;
         }
 
         blocks.push(`${header}\n${body}`);
