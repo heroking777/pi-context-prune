@@ -11,7 +11,7 @@ Keep summarized calls and their `toolResult` messages paired in Pi's provider co
 - [x] Add and run focused regression cases for multi-call, partial summaries, unpruned results, summarized errors, Pi AI message transformation, and Raw lookup.
 - [x] Replay the copied T02 session through the real Pi provider path with fake transport; assert zero orphan calls/placeholders and retain query schema/refs.
 - [x] Run TypeScript, package guard, required portable tests, fake-provider replay, Raw lookup, and `git diff --check`; optional Phase5 differential skipped because no reference bundle is available.
-- [ ] Update Project Map/TODO/CHANGES; commit and push source branch and canonical docs branch; verify both remote refs.
+- [x] Update Project Map/TODO/CHANGES; commit and push the source branch and canonical docs branch; verify both remote refs.
 
 ## Constraints
 No live model API, cap reset, production bundle, shared settings, or original-session modification. Do not widen the source fix beyond this context-pairing defect.
