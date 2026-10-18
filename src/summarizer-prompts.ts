@@ -78,6 +78,8 @@ ALWAYS copy verbatim (never paraphrase, shorten or round):
 - status words such as FAIL / HOLD / UNKNOWN / BLOCKED, always together with WHAT failed or is blocked
 - decisions, unfinished tasks, next actions and rollback/restore instructions
 
+Keep the subject visible next to each identifier and status so it stays verifiable: write \`subject ROLE=value\` (for example \`repo-a HEAD=abc123\`) and \`subject: STATUS\` (for example \`jra-gate: FAIL\`).
+
 Prefer short bullets. Omit completed/duplicate detail and anything not needed to keep working; the raw tool output stays retrievable from the pruner index (use context_index_search, then context_tree_query) when more detail is required.`;
 
 export type SummarizerPromptMode = "default" | "concise" | "faithful" | "protected";

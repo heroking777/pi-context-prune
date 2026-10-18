@@ -85,23 +85,60 @@ export interface IdentifierCheck {
   contradictions: IdentifierPair[];
 }
 
-/** Every tier-1 raw identifier must keep its role and value in the summary. */
-export function checkIdentifierRelations(rawText: string, summaryText: string): IdentifierCheck {
-  const rawPairs = resolveIdentifiers(rawText).pairs.filter((pair) => pair.tier === 1);
-  const summaryPairs: IdentifierPair[] = [];
+interface SummaryOccurrence extends IdentifierPair { index: number; }
+
+function summaryIdentifierOccurrences(summaryText: string): SummaryOccurrence[] {
+  const out: SummaryOccurrence[] = [];
   for (const spec of IDENTIFIER_ROLES) {
     if (spec.tier !== 1) continue;
     const regex = new RegExp(`\\b${spec.label}\\s*[=:]\\s*([A-Za-z0-9._/-]{2,})`, "gi");
     for (const match of summaryText.matchAll(regex)) {
       const value = match[1];
-      if (typeof value === "string") summaryPairs.push({ role: spec.role, value, subject: "summary", category: spec.category, tier: 1 });
+      if (typeof value === "string") out.push({ role: spec.role, value, subject: "summary", category: spec.category, tier: 1, index: match.index ?? 0 });
     }
   }
+  return out.sort((a, b) => a.index - b.index);
+}
+
+/** Nearest raw subject token before a position, or undefined when none precedes it. */
+function nearestSubject(summaryText: string, index: number, subjects: string[]): string | undefined {
+  let best: { subject: string; position: number } | undefined;
+  for (const subject of subjects) {
+    const position = summaryText.lastIndexOf(subject, index);
+    if (position >= 0 && (!best || position > best.position)) best = { subject, position };
+  }
+  return best?.subject;
+}
+
+/**
+ * Every tier-1 identifier must keep its role, value AND subject. When a role has
+ * several subjects (so values could be swapped) the subject nearest to the
+ * summary occurrence must match; otherwise the item is unresolved. A single
+ * subject per role needs no explicit binding because there is nothing to swap.
+ */
+export function checkIdentifierRelations(rawText: string, summaryText: string): IdentifierCheck {
+  const rawPairs = resolveIdentifiers(rawText).pairs.filter((pair) => pair.tier === 1);
+  const subjectsByRole = new Map<string, Set<string>>();
+  for (const pair of rawPairs) {
+    if (pair.subject === "unknown") continue;
+    if (!subjectsByRole.has(pair.role)) subjectsByRole.set(pair.role, new Set());
+    subjectsByRole.get(pair.role)!.add(pair.subject);
+  }
+  const occurrences = summaryIdentifierOccurrences(summaryText);
   const unresolved: IdentifierPair[] = [];
   const contradictions: IdentifierPair[] = [];
   for (const pair of rawPairs) {
-    if (summaryPairs.some((candidate) => candidate.role === pair.role && candidate.value === pair.value)) continue;
-    const sameRole = summaryPairs.some((candidate) => candidate.role === pair.role);
+    const subjects = [...(subjectsByRole.get(pair.role) ?? new Set<string>())];
+    const matches = occurrences.filter((occurrence) => occurrence.role === pair.role && occurrence.value === pair.value);
+    if (matches.length > 0) {
+      if (subjects.length <= 1) continue;
+      if (pair.subject === "unknown") { unresolved.push(pair); continue; }
+      const bound = matches.some((occurrence) => nearestSubject(summaryText, occurrence.index, subjects) === pair.subject);
+      if (bound) continue;
+      contradictions.push(pair);
+      continue;
+    }
+    const sameRole = occurrences.some((occurrence) => occurrence.role === pair.role);
     (sameRole ? contradictions : unresolved).push(pair);
   }
   return { unresolved, contradictions };

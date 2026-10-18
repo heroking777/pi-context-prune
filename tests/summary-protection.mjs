@@ -121,6 +121,34 @@ ok("build and release are separate roles and both required",
   extractProtectedItems("BUILD_ID=build-1234\nRELEASE=rel-9").filter((item) => item.tier === 1 && (item.category === "build-id" || item.category === "release")).length === 2 &&
   verifyProtectedSummary("BUILD_ID=build-1234\nRELEASE=rel-9", "BUILD_ID=build-1234").ok === false &&
   verifyProtectedSummary("BUILD_ID=build-1234\nRELEASE=rel-9", "BUILD_ID=build-1234 RELEASE=rel-9").ok === true);
+// Phase39 — identifier subject binding across multiple repositories.
+const X = "1".repeat(40), Y = "2".repeat(40);
+const repoRaw = [
+  `Tool: bash({"command":"git -C /srv/repo-a rev-parse HEAD"})`,
+  `Result (OK): HEAD=${X}`,
+  `Tool: bash({"command":"git -C /srv/repo-b rev-parse HEAD"})`,
+  `Result (OK): HEAD=${Y}`,
+].join("\n");
+ok("per-repo HEAD values are bound to their own subject",
+  verifyProtectedSummary(repoRaw, `/srv/repo-a HEAD=${X} /srv/repo-b HEAD=${Y}`).ok === true);
+ok("a cross-repo HEAD swap is rejected even though both role/value pairs exist",
+  verifyProtectedSummary(repoRaw, `/srv/repo-a HEAD=${Y} /srv/repo-b HEAD=${X}`).ok === false &&
+  verifyProtectedSummary(repoRaw, `/srv/repo-a HEAD=${Y} /srv/repo-b HEAD=${X}`).identifierContradictions.length > 0);
+ok("a role/value without its subject is unresolved when several subjects exist",
+  verifyProtectedSummary(repoRaw, `HEAD=${X} HEAD=${Y}`).ok === false &&
+  (verifyProtectedSummary(repoRaw, `HEAD=${X} HEAD=${Y}`).identifierUnresolved.length + verifyProtectedSummary(repoRaw, `HEAD=${X} HEAD=${Y}`).identifierContradictions.length) > 0);
+const sameShaRaw = [
+  `Tool: bash({"command":"git -C /srv/repo-a rev-parse HEAD"})`,
+  `Result (OK): HEAD=${X}`,
+  `Tool: bash({"command":"git -C /srv/repo-b rev-parse HEAD"})`,
+  `Result (OK): HEAD=${X}`,
+].join("\n");
+ok("the same value on two subjects still requires subject binding",
+  verifyProtectedSummary(sameShaRaw, `/srv/repo-a HEAD=${X} /srv/repo-b HEAD=${X}`).ok === true);
+ok("an unknown subject with a single value needs no binding",
+  verifyProtectedSummary(`HEAD=${X}`, `HEAD=${X}`).ok === true &&
+  verifyProtectedSummary(`HEAD=${X}`, `HEAD=${Y}`).ok === false);
+
 ok("swapping the GitHub and VPS identifiers is rejected",
   verifyProtectedSummary(`HEAD=${A}\nDEPLOYED_SHA=${B}`, `HEAD=${B} DEPLOYED_SHA=${A}`).ok === false &&
   verifyProtectedSummary(`HEAD=${A}\nDEPLOYED_SHA=${B}`, `HEAD=${B} DEPLOYED_SHA=${A}`).identifierContradictions.length > 0);
