@@ -23,8 +23,13 @@ export function bareHeadRecords(rawText: string, cwd?: string): { records: Prote
     const line = lines[i];
     if (!line.startsWith("Tool: ")) continue;
     let j = i + 1;
-    while (j < lines.length && !/^Result \((?:OK|ERROR)\):/.test(lines[j])) j += 1;
-    if (j >= lines.length) break;
+    while (j < lines.length && !/^Result \((?:OK|ERROR)\):/.test(lines[j])) {
+      // A tool block never spans a separator or the next tool call: a malformed
+      // block must not inherit another call's result.
+      if (lines[j].trim() === "---" || lines[j].startsWith("Tool: ")) break;
+      j += 1;
+    }
+    if (j >= lines.length || !/^Result \((?:OK|ERROR)\):/.test(lines[j])) { i = j > i ? j - 1 : i; continue; }
     const resultLine = lines[j];
     if (!resultLine.startsWith("Result (OK):")) { i = j; continue; }
     // The serialized tool block is pretty-printed JSON, so the command is on a

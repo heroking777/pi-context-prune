@@ -17,6 +17,7 @@ await import("./hybrid-realdefects.mjs");
 await import("./hybrid-provenance.mjs");
 await import("./hybrid-integration.mjs");
 await import("./hybrid-temporal.mjs");
+await import("./hybrid-attribution.mjs");
 await import("./protection-retry.mjs");
 await import("./protection-capacity.mjs");
 console.log(`\nRESULT pass=${state.pass} fail=${state.fail}`);

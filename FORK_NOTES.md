@@ -198,3 +198,10 @@ absolute repository/path in their own tool call stay `s:"unknown"`, `u:true`. Th
 produced. An explicit `-C /absolute/path` still binds; a relative `-C` (`.`,
 `./repo`) does not. Bare-HEAD capture is unchanged except that it, too, requires
 an absolute `-C` path for a subject.
+
+Phase 58 attribution rules: a subject must be established by a line-anchored
+`Tool:` call that precedes the protected value. Text before the first tool block
+(assistant prose) is never call-local, status pairs outside tool output are not
+records, and a malformed tool block does not inherit the next block's result.
+Tool-block detection is line-anchored so a result body containing the literal
+text `Tool: ` cannot create a false boundary.

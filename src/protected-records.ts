@@ -6,7 +6,7 @@
 // The same `expectedRecords` function is the single authority for both.
 import { extractProtectedItemsDetailed, type ProtectedItem, type ProtectionVerdict } from "./summary-protection.js";
 import { bareHeadRecords } from "./bare-head.js";
-import { extractStatusPairs, resolveIdentifiers, subjectAtIndex } from "./summary-protection-semantics.js";
+import { extractStatusPairsIndexed, resolveIdentifiers, subjectAtIndex } from "./summary-protection-semantics.js";
 
 export interface ProtectedRecord {
   /** `id`, `st`, or a marker category (task/next/rollback/decision/error). */
@@ -160,7 +160,17 @@ export function expectedRecords(rawText: string): ExpectedRecords {
     const label = ROLE_LABEL[pair.role];
     if (label) push({ c: "id", r: label, ...(pair.subject.includes("/") ? { s: pair.subject } : { s: "unknown", u: true as const }), v: pair.value });
   }
-  const pairs = extractStatusPairs(rawText);
+  // Status pairs are only meaningful inside tool output; a pair written in the
+  // assistant preamble is not call-local and must not become a record.
+  // Line-anchored: a result body may itself contain the string "Tool: ".
+  let firstTool = -1;
+  let offset = 0;
+  for (const line of rawText.split("\n")) {
+    if (line.startsWith("Tool: ")) { firstTool = offset; break; }
+    offset += line.length + 1;
+  }
+  const hasToolBlocks = firstTool >= 0;
+  const pairs = hasToolBlocks ? extractStatusPairsIndexed(rawText).filter((pair) => pair.index > firstTool) : extractStatusPairsIndexed(rawText);
   for (const pair of pairs) push({ c: "st", s: pair.subject, v: pair.status });
   // A bare FAIL/HOLD with no structured pair still has to survive: record it
   // with explicit unknown provenance instead of inventing a subject.
@@ -171,6 +181,8 @@ export function expectedRecords(rawText: string): ExpectedRecords {
         const index = rawText.indexOf(item.value, from);
         if (index < 0) break;
         from = index + item.value.length;
+        // Only status text inside tool output is evidence; assistant prose is not.
+        if (hasToolBlocks && index < firstTool) continue;
         push({ c: "st", ...subjectAt(index), v: item.value });
       }
     }

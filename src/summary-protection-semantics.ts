@@ -48,9 +48,15 @@ export function subjectForValue(rawText: string, value: string): string {
  * extraction, core construction and guard validation — uses this.
  */
 export function subjectAtIndex(rawText: string, index: number): string {
+  // Only a line that actually starts a tool call can carry the subject. Text
+  // before the first tool block (assistant prose) is not call-local.
   const before = rawText.slice(0, index);
-  const toolIndex = before.lastIndexOf("\nTool:");
-  const line = before.slice(toolIndex + 1).split("\n")[0] ?? "";
+  const lines = before.split("\n");
+  let line = "";
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    if (lines[i].startsWith("Tool: ")) { line = lines[i]; break; }
+  }
+  if (line === "") return "unknown";
   const path = line.match(/(?:\/[\w.@+-]+)+/);
   if (path) return path[0];
   const repo = line.match(/\b[\w.-]+\/[\w.-]+\b/);
@@ -195,16 +201,21 @@ function normalizePair(first: string, second: string): ProtectedRelation | null 
   return { status, subject };
 }
 
-/** Structured status/subject pairs in text order. */
-export function extractStatusPairs(text: string): ProtectedRelation[] {
-  const out: ProtectedRelation[] = [];
+/** Structured status/subject pairs with their source offset. */
+export function extractStatusPairsIndexed(text: string): (ProtectedRelation & { index: number })[] {
+  const out: (ProtectedRelation & { index: number })[] = [];
   for (const regex of PAIR_REGEXES) {
     for (const match of text.matchAll(new RegExp(regex.source, regex.flags))) {
       const pair = normalizePair(match[1], match[2]);
-      if (pair) out.push(pair);
+      if (pair) out.push({ ...pair, index: match.index ?? 0 });
     }
   }
   return out;
+}
+
+/** Structured status/subject pairs in text order. */
+export function extractStatusPairs(text: string): ProtectedRelation[] {
+  return extractStatusPairsIndexed(text).map(({ status, subject }) => ({ status, subject }));
 }
 
 function pairKey(subject: string, status: string): string {
