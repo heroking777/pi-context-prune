@@ -25,7 +25,7 @@ import {
   finishProtectedAttempt,
   type ProtectionAttempt,
 } from "./summary-protection-store.js";
-export { protectionFailureCount, clearProtectionFailures, isProtectionPaused, isProtectionAtCapacity, protectionSessionCount, protectionSlotCount } from "./summary-protection-store.js";
+export { protectionFailureCount, clearProtectionFailures, isProtectionPaused, isProtectionAtCapacity, protectionSessionCount, protectionSlotCount, protectionAdmissionCount } from "./summary-protection-store.js";
 import type { FloorSkippedResult } from "./flush-policy.js";
 import {
   CREDIT_EXHAUSTED_MARKER,

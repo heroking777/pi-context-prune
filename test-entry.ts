@@ -14,6 +14,7 @@ export {
   isProtectionAtCapacity,
   protectionSessionCount,
   protectionSlotCount,
+  protectionAdmissionCount,
   isProtectionTracked,
   tryAdmitProtectionSession,
   releaseProtectionAdmission,

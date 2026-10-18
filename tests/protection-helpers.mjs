@@ -52,3 +52,39 @@ export const cfgOn = { ...DEFAULT_CONFIG, protectedSummaryCompression: true };
 export const cfgOff = { ...DEFAULT_CONFIG, protectedSummaryCompression: false };
 export const batch = (toolCalls) => ({ turnIndex: 1, timestamp: 1, toolCalls });
 export const variation = (n) => batch([{ toolName: "bash", toolCallId: `v${n}`, args: { command: `step ${n}` }, resultText: `FINAL_SHA=${SHA(n)} ${PATH} status PASS`.replace("PASS", "PASS"), isError: false }]);
+
+/**
+ * Deferred provider: each stream suspends until the test releases it, so
+ * concurrent-admission interleavings are deterministic.
+ */
+export function deferredCtx(session = "deferred", lossy = false) {
+  const calls = { n: 0, resolvers: [] };
+  const provider = {
+    stream(_model, ctxArg) {
+      calls.n += 1;
+      const userText = ctxArg.messages[0].content.map((p) => p.text).join("\n");
+      const body = userText.split("<tool-call-batch>")[1]?.split("</tool-call-batch>")[0] ?? "";
+      const pairs = [...body.matchAll(/([A-Za-z0-9_.:/-]{2,40})\s*[:=]\s*(FAIL|HOLD|BLOCKED)\b/gi)].map((m) => `${m[1]}: ${m[2]}`);
+      const ids = [...body.matchAll(/\b(FINAL_SHA|BASE_SHA|CURRENT_SHA|ACTIVE_SHA|DEPLOYED_SHA|HEAD|BUILD_ID|RELEASE)\s*[=:]\s*([A-Za-z0-9._/-]{2,})/gi)].map((m) => `${m[1].toUpperCase()}=${m[2]}`);
+      const text = lossy
+        ? "Compressed summary without any identifiers."
+        : extractProtectedItems(body).map((item) => item.value).join("\n") + "\n" + pairs.join("\n") + "\n" + ids.join("\n");
+      const result = { stopReason: "stop", content: [{ type: "text", text }],
+        usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 }, timestamp: Date.now() };
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      calls.resolvers.push(release);
+      return Object.assign((async function* () { await gate; yield { type: "text_end", partial: result }; })(), { result: async () => result });
+    },
+  };
+  return {
+    calls,
+    ctx: {
+      model: { provider: "fake", id: "m" },
+      modelRegistry: { getApiKeyAndHeaders: async () => ({ ok: true, apiKey: "k", headers: {}, env: {} }), getProvider: () => provider, find: () => undefined },
+      ui: { notify: () => {} },
+      sessionManager: { getSessionId: () => session },
+    },
+    releaseNext() { const next = calls.resolvers.shift(); if (next) next(); },
+  };
+}

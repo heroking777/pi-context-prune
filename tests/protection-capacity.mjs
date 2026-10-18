@@ -1,8 +1,8 @@
 // Phase 33/34/35 — session isolation, capacity admission and single-flight.
 import { DEFAULT_CONFIG, summarizeBatch, PROTECTION_FAILURE_MARKER,
   protectionFailureCount, clearProtectionFailures, isProtectionPaused,
-  isProtectionAtCapacity, protectionSessionCount, protectionSlotCount, ok } from "./test-support.mjs";
-import { SHA, PATH, PROTECTED_BATCH, fakeCtx, batch, variation, cfgOn } from "./protection-helpers.mjs";
+  isProtectionAtCapacity, protectionSessionCount, protectionSlotCount, protectionAdmissionCount, ok } from "./test-support.mjs";
+import { SHA, PATH, PROTECTED_BATCH, fakeCtx, deferredCtx, batch, variation, cfgOn } from "./protection-helpers.mjs";
 // ── 8. Phase33/34: session isolation ───────────────────────────────────────
 clearProtectionFailures();
 const sessionA = fakeCtx("lossy", "session-A");
@@ -153,3 +153,88 @@ const retainedCalls = retain.calls.n;
 await summarizeBatch(PROTECTED_BATCH, cfgOn, retain.ctx);
 ok("retained failure state is never released or re-sent", retain.calls.n === retainedCalls && protectionSlotCount() === 1);
 clearProtectionFailures();
+
+// ── 12. Phase41: admission reference counting interleaving ─────────────────
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+clearProtectionFailures();
+const refA = deferredCtx("ref-A");
+const refBatch1 = summarizeBatch(variation(1), cfgOn, refA.ctx);
+await tick();
+const refBatch2 = summarizeBatch(variation(2), cfgOn, refA.ctx);
+await tick();
+ok("two in-flight batches of one session share a single slot",
+  protectionSlotCount() === 1 && protectionAdmissionCount("ref-A") === 2 && refA.calls.n === 2);
+refA.releaseNext();
+await tick();
+ok("finishing one batch does not release the session slot early",
+  protectionAdmissionCount("ref-A") === 1 && protectionSlotCount() === 1);
+const refOthers = [];
+for (let i = 0; i < 7; i++) {
+  const c = deferredCtx(`ref-${i}`);
+  refOthers.push(c);
+  void summarizeBatch(variation(10 + i), cfgOn, c.ctx);
+}
+await tick();
+ok("eight distinct sessions are active while one still holds an in-flight batch",
+  protectionSlotCount() === 8 && protectionSessionCount() === 0);
+const refNinth = deferredCtx("ref-ninth");
+const ninthRefResult = await summarizeBatch(variation(99), cfgOn, refNinth.ctx);
+ok("the ninth distinct session fails closed while eight remain active",
+  ninthRefResult.reason === "capacity" && refNinth.calls.n === 0 && protectionSlotCount() === 8);
+refA.releaseNext();
+await Promise.all([refBatch1, refBatch2]);
+for (const c of refOthers) c.releaseNext();
+await tick();
+ok("all slots are released after every attempt completes",
+  protectionSlotCount() === 0 && protectionSessionCount() === 0);
+
+// Same-batch single-flight with a deferred provider.
+clearProtectionFailures();
+const sfDeferred = deferredCtx("ref-sf");
+const sfFirst = summarizeBatch(variation(5), cfgOn, sfDeferred.ctx);
+await tick();
+const sfSecond = await summarizeBatch(variation(5), cfgOn, sfDeferred.ctx);
+ok("the duplicate same-batch attempt is rejected without a second call",
+  sfSecond.reason === "in-flight" && sfDeferred.calls.n === 1 && protectionAdmissionCount("ref-sf") === 1);
+sfDeferred.releaseNext();
+await sfFirst;
+await tick();
+ok("the single-flight release leaves no admission behind", protectionAdmissionCount("ref-sf") === 0 && protectionSlotCount() === 0);
+
+// Out-of-order completion plus 429 on one of the batches.
+clearProtectionFailures();
+const mixedA = deferredCtx("ref-mixed");
+const mixedB = deferredCtx("ref-mixed-b");
+const mixedFirst = summarizeBatch(variation(21), cfgOn, mixedA.ctx);
+const mixedSecond = summarizeBatch(variation(22), cfgOn, mixedB.ctx);
+await tick();
+mixedB.releaseNext();
+await mixedSecond;
+await tick();
+ok("out-of-order completion releases only the finished session's slot",
+  protectionAdmissionCount("ref-mixed-b") === 0 && protectionAdmissionCount("ref-mixed") === 1 && protectionSlotCount() === 1);
+mixedA.releaseNext();
+await mixedFirst;
+await tick();
+ok("out-of-order completion leaves no leaked slots", protectionSlotCount() === 0);
+
+// Failure conversion while another batch of the same session is in flight.
+clearProtectionFailures();
+const failDeferred = deferredCtx("ref-fail", true);
+const failFirst = summarizeBatch(variation(31), cfgOn, failDeferred.ctx);
+await tick();
+const failSecond = summarizeBatch(variation(32), cfgOn, failDeferred.ctx);
+await tick();
+failDeferred.releaseNext();
+const failFirstResult = await failFirst;
+await tick();
+ok("a failure promotes the session while another batch is still in flight",
+  protectionSessionCount() === 1 && protectionFailureCount("ref-fail") === 1 &&
+  failFirstResult[PROTECTION_FAILURE_MARKER] === true && protectionAdmissionCount("ref-fail") === 0);
+failDeferred.releaseNext();
+const failSecondResult = await failSecond;
+await tick();
+ok("the remaining in-flight batch resolves without leaking a slot",
+  failSecondResult[PROTECTION_FAILURE_MARKER] === true && protectionSlotCount() === 1 && protectionSessionCount() === 1);
+clearProtectionFailures();
+ok("clearing removes tracked and admitted state", protectionSlotCount() === 0 && protectionSessionCount() === 0);

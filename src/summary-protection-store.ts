@@ -97,22 +97,35 @@ export function finishProtectedAttempt(attempt: ProtectionAttempt): void {
 }
 
 /**
- * Reserves a slot for a first attempt. Returns `already` when the session is
- * tracked or already reserved, `capacity` when the slot budget is exhausted.
+ * Reserves a slot for a first attempt. Each concurrent attempt for the same
+ * session increments a reference count, so a slot is released only when the
+ * last in-flight batch of that session finishes. Returns `already` when the
+ * session is tracked or already reserved, `capacity` when the slot budget is
+ * exhausted.
  */
 export function tryAdmitProtectionSession(sessionKey: string): "admitted" | "already" | "capacity" {
-  if (sessions.has(sessionKey) || admissions.has(sessionKey)) return "already";
+  if (sessions.has(sessionKey)) return "already";
+  const current = admissions.get(sessionKey);
+  if (current !== undefined) {
+    admissions.set(sessionKey, current + 1);
+    return "already";
+  }
   if (totalSlots() >= MAX_TRACKED_SESSIONS) return "capacity";
   admissions.set(sessionKey, 1);
   return "admitted";
 }
 
-/** Releases a temporary slot. A no-op for tracked sessions. */
+/** Releases one reference; the slot disappears only when the count reaches 0. */
 export function releaseProtectionAdmission(sessionKey: string): void {
   const count = admissions.get(sessionKey);
   if (count === undefined) return;
   if (count <= 1) admissions.delete(sessionKey);
   else admissions.set(sessionKey, count - 1);
+}
+
+/** In-flight reference count for a session (0 when not admitted). */
+export function protectionAdmissionCount(sessionKey: string): number {
+  return admissions.get(sessionKey) ?? 0;
 }
 
 /** Same session+batch single-flight. `false` means another attempt is running. */
@@ -137,6 +150,9 @@ export function getSuppressedProtectionFailure(sessionKey: string, batchKey: str
     if (state.paused) return "paused";
     return state.failures.get(batchKey);
   }
+  // An already-admitted session is not a new entrant: its other in-flight
+  // batches must not be blocked by the capacity check.
+  if (admissions.has(sessionKey)) return undefined;
   return totalSlots() >= MAX_TRACKED_SESSIONS ? "capacity" : undefined;
 }
 

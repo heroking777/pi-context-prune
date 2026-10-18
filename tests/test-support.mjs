@@ -10,7 +10,7 @@ export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizerProm
   extractProtectedItemsDetailed, protectionFailureKey, PROTECTION_FAILURE_MARKER,
   protectionRejectionReason,
   protectionFailureCount, clearProtectionFailures, isProtectionPaused,
-  isProtectionAtCapacity, protectionSessionCount, protectionSlotCount,
+  isProtectionAtCapacity, protectionSessionCount, protectionSlotCount, protectionAdmissionCount,
   isProtectionTracked, tryAdmitProtectionSession, releaseProtectionAdmission,
   beginProtectionSingleFlight, endProtectionSingleFlight,
   formatEvidenceAppendix: _fmt, extractEvidenceAppendix: _ext, safeToolCallText: _safe,
