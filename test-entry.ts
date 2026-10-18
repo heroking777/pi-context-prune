@@ -74,6 +74,7 @@ export { serializeBatchForSummarizer } from "./src/batch-capture.js";
 export { ToolCallIndexer, MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery, deriveSearchRef } from "./src/indexer.js";
 export { summarizeBatches } from "./src/summarizer-batch.js";
 export { buildProtectedCore, assembleHybridSummary } from "./src/hybrid-summary.js";
+export { parseRecords, expectedRecords, verifyRecords } from "./src/protected-records.js";
 export { checkMarkerSubjects, subjectAtIndex } from "./src/summary-protection-semantics.js";
 export { registerIndexSearchTool } from "./src/index-search-tool.js";
 export { registerQueryTool } from "./src/query-tool.js";

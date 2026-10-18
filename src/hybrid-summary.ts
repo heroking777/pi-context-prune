@@ -1,29 +1,13 @@
-// Phase47/48: hybrid summary assembly.
+// Phase47/50: hybrid summary assembly with structured protected records.
 //
-// Stage A (deterministic) extracts the protected core from raw tool output and
-// renders it in the exact form the guard validates. Stage B hands only the
-// remaining noncritical lines to the LLM. Stage C concatenates the two; the
-// caller re-validates the assembled text with the single existing guard.
-//
-// Integrity rules: deduplication is per (role/category, subject, value) so two
-// subjects never collapse; protected values are never truncated; a line that
-// cannot be rendered safely fails closed before any provider call.
-import { extractProtectedItemsDetailed, verifyProtectedSummary } from "./summary-protection.js";
-import { extractStatusPairs, resolveIdentifiers, subjectAtIndex } from "./summary-protection-semantics.js";
+// Stage A extracts the protected record set deterministically and renders it as
+// `@rec {json}` tuples. Stage B sends only the remaining noncritical lines to the
+// LLM. Stage C concatenates the two; the caller re-validates with the single
+// guard, which compares records by exact tuple equality.
+import { verifyProtectedSummary } from "./summary-protection.js";
+import { expectedRecords, renderRecord } from "./protected-records.js";
 
-const ROLE_LABEL: Record<string, string> = {
-  "final-sha": "FINAL_SHA",
-  "head-sha": "HEAD",
-  "current-sha": "CURRENT_SHA",
-  "deployed-sha": "DEPLOYED_SHA",
-  "active-sha": "ACTIVE_SHA",
-  "build-id": "BUILD_ID",
-  release: "RELEASE",
-};
-const MARKER_CATEGORIES = new Set(["decision", "task", "next", "rollback", "error"]);
 const MARKER_LINE = /^(?:UNFINISHED_TASK|TODO|NEXT(?:_ACTION|_TASK|_STEP)?|ROLLBACK|DECISION)\s*[=:]/i;
-const MAX_CORE_LINES = 60;
-const MAX_RENDERED_LINE = 2000;
 
 export interface ProtectedCore {
   ok: boolean;
@@ -33,96 +17,35 @@ export interface ProtectedCore {
   reason?: string;
 }
 
-function lineFor(rawText: string, value: string): string {
-  const index = rawText.indexOf(value);
-  if (index < 0) return value;
-  const start = rawText.lastIndexOf("\n", index) + 1;
-  const end = rawText.indexOf("\n", index);
-  return rawText.slice(start, end < 0 ? rawText.length : end).trim();
-}
-
-/** Renders one protected line without ever truncating the required value. */
-function render(subject: string, text: string, value: string): string {
-  const body = text.length > MAX_RENDERED_LINE ? value : text;
-  return `- ${subject} | ${body}`;
-}
-
+/**
+ * Builds the deterministic core and the reduced LLM input. Ambiguity, oversized
+ * values, record overflow or a core that does not satisfy the guard all fail
+ * closed before any provider call.
+ */
 export function buildProtectedCore(rawText: string): ProtectedCore {
-  const extraction = extractProtectedItemsDetailed(rawText);
-  if (extraction.ambiguousActive.length > 0) {
-    return { ok: false, core: "", notesInput: "", itemCount: 0, reason: `ambiguous:${extraction.ambiguousActive.join(",")}` };
+  const expected = expectedRecords(rawText);
+  if (!expected.ok) {
+    return { ok: false, core: "", notesInput: "", itemCount: expected.records.length, reason: expected.reason };
   }
-  const lines: string[] = [];
-  const seen = new Set<string>();
-  const seenLines = new Set<string>();
-  const protectedValues = new Set<string>();
-  const protectedLines = new Set<string>();
-
-  const identifiers = resolveIdentifiers(rawText).pairs.filter((pair) => pair.tier === 1);
-  for (const pair of identifiers) {
-    const label = ROLE_LABEL[pair.role];
-    if (!label) continue;
-    const key = `id|${label}|${pair.subject}|${pair.value}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    protectedValues.add(pair.value);
-    lines.push(`- ${pair.subject} | ${label}=${pair.value}`);
-  }
-
-  for (const pair of extractStatusPairs(rawText)) {
-    const key = `st|${pair.subject}|${pair.status}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    protectedValues.add(`${pair.subject}: ${pair.status}`);
-    lines.push(`- ${pair.subject}: ${pair.status}`);
-  }
-
-  const markers = extraction.items.filter((item) => MARKER_CATEGORIES.has(item.category) && item.tier === 1);
-  for (const item of markers) {
-    let from = 0;
-    for (;;) {
-      const index = rawText.indexOf(item.value, from);
-      if (index < 0) break;
-      from = index + item.value.length;
-      const subject = subjectAtIndex(rawText, index);
-      const key = `m|${item.category}|${subject}|${item.value}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      protectedValues.add(item.value);
-      const line = lineFor(rawText, item.value);
-      protectedLines.add(line);
-      const rendered = render(subject, line, item.value);
-      if (seenLines.has(rendered)) continue;
-      seenLines.add(rendered);
-      lines.push(rendered);
-    }
-  }
-
-  if (lines.length > MAX_CORE_LINES) {
-    return { ok: false, core: "", notesInput: "", itemCount: lines.length, reason: "core-overflow" };
-  }
-  const core = lines.join("\n");
+  const core = expected.records.map(renderRecord).join("\n");
   const check = verifyProtectedSummary(rawText, core);
   if (!check.ok) {
     const missing = [...new Set(check.missing.map((item) => item.category))].join(",");
-    return { ok: false, core, notesInput: "", itemCount: lines.length, reason: `core-invalid:${missing || "relation"}` };
+    return { ok: false, core, notesInput: "", itemCount: expected.records.length, reason: `core-invalid:${missing || "relation"}` };
   }
-
+  const values = new Set(expected.records.map((record) => record.v));
   const notesInput = rawText
     .split("\n")
     .filter((line) => {
       const trimmed = line.trim();
       if (trimmed.length === 0) return false;
       if (MARKER_LINE.test(trimmed)) return false;
-      if (protectedLines.has(trimmed)) return false;
-      for (const value of protectedValues) if (trimmed.includes(value)) return false;
+      for (const value of values) if (value.length > 0 && trimmed.includes(value)) return false;
       return true;
     })
     .join("\n");
-
-  return { ok: true, core, notesInput, itemCount: lines.length };
+  return { ok: true, core, notesInput, itemCount: expected.records.length };
 }
-
 
 /** Assembles the final summary: deterministic core first, LLM notes second. */
 export function assembleHybridSummary(core: string, llmNotes: string): string {

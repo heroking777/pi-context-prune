@@ -14,6 +14,7 @@
 // passed.
 import { createHash } from "node:crypto";
 import { TIER1_EXTRACTORS, TIER2_EXTRACTORS, MAX_PER_CATEGORY, MAX_TIER1_SCAN, MAX_TIER2_SCAN, type Extractor } from "./summary-protection-extractors.js";
+import { parseRecords, verifyStructuredSummary } from "./protected-records.js";
 import { resolveIdentifiers, checkIdentifierRelations, checkStatusRelations, checkMarkerSubjects, type IdentifierPair } from "./summary-protection-semantics.js";
 
 export type ProtectedCategory =
@@ -190,12 +191,15 @@ export interface ProtectionVerdict {
   ambiguousActive: string[];
 }
 
+
 /**
  * Verifies tier-1 working state against the summary. Tier-2 detail may be
  * omitted because it stays retrievable from the index; it is counted, not
  * enforced. A tier-1 scan truncation or tier-1 overflow fails closed.
  */
 export function verifyProtectedSummary(rawText: string, summaryText: string): ProtectionVerdict {
+  const structured = parseRecords(summaryText);
+  if (structured.length > 0) return verifyStructuredSummary(rawText, summaryText, structured);
   const extraction = extractProtectedItemsDetailed(rawText);
   const tier1 = extraction.items.filter((item) => item.tier === 1);
   const tier2 = extraction.items.filter((item) => item.tier === 2);

@@ -142,3 +142,10 @@ resolution has a single implementation (`subjectAtIndex`) shared by identifier
 extraction, core construction and guard validation, and marker binding now
 requires the *nearest* subject before an occurrence to match exactly (proximity
 within a window is not sufficient).
+
+Phase 50: the protected core is now rendered as structured `@rec {json}`
+tuples (category, exact subject, exact role, exact value). Verification compares
+tuples for exact equality, so a matching value under a different subject, a
+subject mentioned in surrounding prose, a prefix-overlapping path, or an
+`unknown` subject are all rejected. Free-form prose summaries still fall back to
+the text checks and are reported as less verifiable than structured records.

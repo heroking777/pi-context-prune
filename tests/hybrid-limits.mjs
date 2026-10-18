@@ -1,7 +1,7 @@
 // Phase49 — overlong-value limits, unified subject authority, exact binding.
 import {
   DEFAULT_CONFIG, SYSTEM_PROMPT, summarizerSystemPrompt, buildProtectedCore,
-  assembleHybridSummary, verifyProtectedSummary, subjectAtIndex, ToolCallIndexer, ok,
+  assembleHybridSummary, verifyProtectedSummary, subjectAtIndex, ToolCallIndexer, parseRecords, ok,
 } from "./test-support.mjs";
 
 const P = "/srv/repo-alpha";
@@ -31,7 +31,7 @@ ok("identifier: over the limit fails closed", verifyProtectedSummary(identOver, 
 const raw = `Tool: bash({"command":"cat ${P}/PLAN.md"})\nResult (OK): UNFINISHED_TASK: do X`;
 const taskIndex = raw.indexOf("do X");
 ok("task subject equals the authoritative resolver", subjectAtIndex(raw, taskIndex) === `${P}/PLAN.md`);
-ok("core uses the same subject", buildProtectedCore(raw).core.includes(`- ${P}/PLAN.md | `));
+ok("core uses the same subject", parseRecords(buildProtectedCore(raw).core).some((r) => r.c === "task" && r.s === `${P}/PLAN.md`));
 const assembled = assembleHybridSummary(buildProtectedCore(raw).core, "- merged reads");
 ok("guard accepts the assembled summary", verifyProtectedSummary(raw, assembled).ok === true);
 

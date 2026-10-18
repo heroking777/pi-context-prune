@@ -2,7 +2,7 @@
 import {
   DEFAULT_CONFIG, SYSTEM_PROMPT, summarizerSystemPrompt, summarizerPromptMode,
   buildProtectedCore, assembleHybridSummary, verifyProtectedSummary, summarizeBatch,
-  PROTECTION_FAILURE_MARKER, ToolCallIndexer, ok,
+  PROTECTION_FAILURE_MARKER, ToolCallIndexer, parseRecords, ok,
 } from "./test-support.mjs";
 
 const A = "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d";
@@ -35,16 +35,19 @@ for (const [name, raw] of Object.entries({ F1, F2, F4 })) {
   ok(`${name}: core alone satisfies the guard`, verifyProtectedSummary(raw, core.core).ok === true);
 }
 const f1 = buildProtectedCore(F1);
+const f1rec = parseRecords(f1.core);
 ok("F1: both repository HEADs are bound to their own subject",
-  f1.core.includes(`/srv/repo-alpha | HEAD=${A}`) && f1.core.includes(`/srv/repo-beta | HEAD=${B}`));
-ok("F1: final identifier keeps its role label", f1.core.includes("FINAL_SHA=3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f"));
+  f1rec.some((r) => r.c === "id" && r.r === "HEAD" && r.s === "/srv/repo-alpha" && r.v === A) &&
+  f1rec.some((r) => r.c === "id" && r.r === "HEAD" && r.s === "/srv/repo-beta" && r.v === B));
+ok("F1: final identifier keeps its role label", f1rec.some((r) => r.c === "id" && r.r === "FINAL_SHA" && r.v === "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f"));
 const f2 = buildProtectedCore(F2);
-ok("F2: failing subject and status are preserved", f2.core.includes("jra-gate: FAIL"));
+ok("F2: failing subject and status are preserved", parseRecords(f2.core).some((r) => r.c === "st" && r.s === "jra-gate" && r.v === "FAIL"));
 const f4 = buildProtectedCore(F4);
+const f4rec = parseRecords(f4.core);
 ok("F4: unfinished task keeps its exact text and subject",
-  f4.core.includes("UNFINISHED_TASK: apply migration to staging") && f4.core.includes("/srv/repo-alpha/PLAN.md"));
-ok("F4: next action is preserved", f4.core.includes("NEXT_ACTION: verify rollback script"));
-ok("F4: rollback instruction and condition are preserved", f4.core.includes("restore /srv/backups/pre-migration.tar.gz if migration fails"));
+  f4rec.some((r) => r.c === "task" && r.v === "apply migration to staging" && r.s === "/srv/repo-alpha/PLAN.md"));
+ok("F4: next action is preserved", f4rec.some((r) => r.c === "next" && r.v === "verify rollback script"));
+ok("F4: rollback instruction and condition are preserved", f4rec.some((r) => r.c === "rollback" && r.v.includes("restore /srv/backups/pre-migration.tar.gz if migration fails")));
 
 // 2. LLM input isolation: protected lines are removed from the notes input.
 ok("protected lines are excluded from the LLM input",
@@ -57,11 +60,11 @@ ok("LLM input is smaller than the raw batch",
 const assembled = assembleHybridSummary(f1.core, "- ran three git commands; no further action needed");
 ok("assembled summary passes the guard", verifyProtectedSummary(F1, assembled).ok === true);
 ok("assembly puts the core first and notes second",
-  assembled.indexOf("## Protected state") < assembled.indexOf("## Notes") && assembled.includes("FINAL_SHA="));
+  assembled.indexOf("## Protected state") < assembled.indexOf("## Notes") && parseRecords(assembled).some((r) => r.r === "FINAL_SHA"));
 
 // 4. Conflicting statuses and multiple tasks.
 const conflict = `Tool: bash({"command":"run /srv/a/gate"})\nResult (OK): /srv/a/gate: FAIL\nResult (OK): /srv/a/gate: PASS`;
-ok("conflicting statuses: the enforced FAIL pair is preserved", buildProtectedCore(conflict).core.includes("/srv/a/gate: FAIL"));
+ok("conflicting statuses: the enforced FAIL pair is preserved", parseRecords(buildProtectedCore(conflict).core).some((r) => r.c === "st" && r.s === "/srv/a/gate" && r.v === "FAIL"));
 const multi = [
   `Tool: bash({"command":"cat /srv/a/PLAN.md"})`,
   "Result (OK): UNFINISHED_TASK: rotate staging credentials",
@@ -70,7 +73,8 @@ const multi = [
 ].join("\n");
 const multiCore = buildProtectedCore(multi);
 ok("multiple tasks with different subjects are all preserved",
-  multiCore.core.includes("rotate staging credentials") && multiCore.core.includes("backfill historical envelopes") &&
+  parseRecords(multiCore.core).some((r) => r.v === "rotate staging credentials") &&
+  parseRecords(multiCore.core).some((r) => r.v === "backfill historical envelopes") &&
   verifyProtectedSummary(multi, multiCore.core).ok === true);
 
 // 5. Fail-closed on ambiguity, overflow and malformed markers.
@@ -79,7 +83,7 @@ ok("ambiguous identifiers fail closed", buildProtectedCore(ambiguous).ok === fal
 const overflow = Array.from({ length: 26 }, (_, i) => `Tool: bash({"command":"s${i}"})\nResult (OK): DECISION=policy-${i}`).join("\n");
 ok("extraction overflow fails closed", buildProtectedCore(overflow).ok === false);
 const malformed = `Tool: bash({"command":"plan"})\nResult (OK): UNFINISHED_TASK apply migration without separator`;
-ok("malformed markers are not invented", buildProtectedCore(malformed).core.includes("UNFINISHED_TASK") === false);
+ok("malformed markers are not invented", parseRecords(buildProtectedCore(malformed).core).every((r) => r.c !== "task"));
 
 // 6. Raw retrieval is unaffected.
 const indexer = new ToolCallIndexer();
@@ -99,7 +103,8 @@ function ctx(text) {
 const batch = { turnIndex: 1, timestamp: 1, toolCalls: [{ toolName: "bash", toolCallId: "t4", args: {}, isError: false, resultText: F4 }] };
 const cfg = { ...DEFAULT_CONFIG, protectedSummaryHybrid: true };
 const result = await summarizeBatch(batch, cfg, ctx("- ran two reads; no further action"));
-ok("hybrid summarizeBatch returns the assembled summary", result && result[PROTECTION_FAILURE_MARKER] !== true && result.summaryText.includes("UNFINISHED_TASK: apply migration to staging") && result.summaryText.includes("## Notes"));
+ok("hybrid summarizeBatch returns the assembled summary", result && result[PROTECTION_FAILURE_MARKER] !== true &&
+  parseRecords(result.summaryText).some((r) => r.c === "task" && r.v === "apply migration to staging") && result.summaryText.includes("## Notes"));
 const bad = await summarizeBatch({ ...batch, toolCalls: [{ ...batch.toolCalls[0], toolCallId: "t5", resultText: ambiguous }] }, cfg, ctx("- notes"));
 ok("hybrid mode fails closed on an ambiguous core", bad && bad[PROTECTION_FAILURE_MARKER] === true);
 
