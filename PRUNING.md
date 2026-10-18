@@ -167,7 +167,7 @@ graph TB
 **Key points:**
 
 - The `AssistantMessage` tool-call blocks are **kept** (they carry `toolCallId`s the model may reference later)
-- Only `ToolResultMessage` entries are **removed** from future context
+- Summarized `ToolResultMessage` content is **replaced with a compact Raw-ref pointer**; the original call ID and error state remain paired
 - Every pruned tool call is also copied into the pruner's runtime/session index with its `toolCallId`, tool name, args, status, turn index, timestamp, and full `resultText`
 - A summary message is injected as a "steer" (guaranteed to land before the next LLM call)
 - The session file retains the original history, and the pruner keeps an index of summarized tool outputs — pruning affects only what the *next* request sees in active context
@@ -180,7 +180,7 @@ Pruning does **not** delete data. It moves raw tool results out of the hot path 
 
 There are two separate things happening during pruning:
 
-1. **Context filtering:** future requests stop including the old `toolResult` messages.
+1. **Context filtering:** future requests retain a compact `toolResult` pointer (with the same call ID) instead of the full result content.
 2. **Index preservation:** the extension stores each summarized tool call in the pruner index, keyed by `toolCallId`.
 
 That distinction is the core idea:
@@ -295,7 +295,7 @@ batch gets summarized
         ├─► tool results indexed by toolCallId
         │      └─► full raw resultText stored in index/session
         │
-        └─► old toolResult messages removed from future context
+        └─► toolResult content compacted to a Raw-ref pointer; call/result pairing preserved
 
 later...
         │
@@ -401,7 +401,7 @@ Prefix caching stores the KV states for an exact token sequence on the provider'
 
 ## Why Frequent Pruning Busts Cache
 
-Every time you prune, you **rewrite the prefix**. The message that was previously a 3,400-token tool result is now a 200-token summary. That's a different token sequence, so the cache is invalidated.
+Every time you prune, you **rewrite the prefix**. The full tool result is replaced by a compact Raw-ref pointer while a separate summary message is added. That's a different token sequence, so the cache is invalidated.
 
 ### ASCII: The per-turn pruning trap (`every-turn` mode)
 
@@ -413,7 +413,7 @@ Every time you prune, you **rewrite the prefix**. The message that was previousl
 │  Turn 1:  Read file → 45 tokens                                         │
 │           └──► summarize → inject summary                               │
 │           │                                                             │
-│           └──► CACHE BUST: context changed from [toolResult] to [sum]   │
+│           └──► CACHE BUST: result changed to [ref] plus [summary]      │
 │                                                                         │
 │  Turn 2:  Read package.json → 120 tokens                                │
 │           └──► summarize → inject summary                               │

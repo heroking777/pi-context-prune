@@ -17,7 +17,7 @@ export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizerProm
   MetadataObserver, measureSummary, withFlushObservation, withPendingBatchMetrics,
   instrumentExtensionAPI, recordBatchOutcome, recordFlushCommit, runWithFlushReason,
   isFloorSkippedBatch, RATE_LIMITED_MARKER, shouldMidTaskAutoPrune,
-  ToolCallIndexer, registerIndexSearchTool, registerQueryTool,
+  ToolCallIndexer, registerIndexSearchTool, registerQueryTool, pruneMessages,
   compactToolOutput, registerToolOutputCompaction,
   buildProtectedCore, assembleHybridSummary, checkMarkerSubjects, subjectAtIndex,
   parseRecords, parseRecordsStrict, expectedRecords, verifyRecords,

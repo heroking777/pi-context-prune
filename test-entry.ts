@@ -80,6 +80,7 @@ export { checkMarkerSubjects, subjectAtIndex } from "./src/summary-protection-se
 export { registerIndexSearchTool } from "./src/index-search-tool.js";
 export { registerQueryTool } from "./src/query-tool.js";
 export { formatSummaryToolCallRefs, formatRefRanges } from "./src/summary-refs.js";
+export { pruneMessages } from "./src/pruner.js";
 export {
   MetadataObserver,
   measureSummary,

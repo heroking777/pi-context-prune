@@ -33,7 +33,7 @@ pi-context-prune/
     ├── batch-capture.ts           # Capture turn results from events or session branch
     ├── summarizer.ts              # LLM call that summarizes a CapturedBatch to markdown
     ├── indexer.ts                 # Runtime Map<toolCallId, ToolCallRecord> + session persistence
-    ├── pruner.ts                  # Filter context event messages (removes summarized ToolResultMessages)
+    ├── pruner.ts                  # Compact summarized ToolResultMessages while preserving calls and Raw refs
     ├── reminder.ts                # Append <pruner-note> reminder to last toolResult (agentic-auto only)
     ├── query-tool.ts              # Register the context_tree_query tool for recovering pruned outputs
     ├── context-prune-tool.ts      # Register the context_prune tool for agentic-auto mode
@@ -112,11 +112,11 @@ Single source of truth for all interfaces and constants:
 Maintains the runtime `Map<toolCallId, ToolCallRecord>` and handles session persistence:
 - **`reconstructFromSession(ctx)`** — scans the current branch's session entries for `CUSTOM_TYPE_INDEX` custom entries and repopulates the in-memory map.
 - **`addBatch(batch, pi)`** — adds all records from a batch to the map and calls `pi.appendEntry(CUSTOM_TYPE_INDEX, ...)` to persist them so they survive restarts and branch switches.
-- **`isSummarized(toolCallId)`** — used by the pruner to decide which messages to drop.
+- **`isSummarized(toolCallId)`** — used by the pruner to decide which results to compact.
 - **`getRecord(toolCallId)`** / **`lookupToolCalls(ids)`** — used by the query tool and tree-browser to retrieve full original outputs.
 
 ### `src/pruner.ts` — Context message filter
-- **`pruneMessages(messages, indexer)`** — filters the `context` event's message array. Drops any message with `role === "toolResult"` whose `toolCallId` is present in the index. All other messages (including `AssistantMessage` tool-call blocks that carry the IDs) are kept so the model can still reference them when calling `context_tree_query`.
+- **`pruneMessages(messages, indexer)`** — compacts indexed `toolResult` content to a short Raw ref while preserving its `toolCallId`, `toolName`, and error state. Matching assistant tool-call blocks and results stay paired; unindexed results remain unchanged.
 
 ### `src/reminder.ts` — Unpruned-count reminder (agentic-auto only)
 - **`countUnprunedToolCalls(messages, indexer)`** — walks `AssistantMessage` `toolCall` content blocks and counts those whose id is NOT in the indexer.
@@ -207,7 +207,7 @@ Accumulates cumulative token/cost stats for summarizer LLM calls and persists th
 
 | Decision | Rationale |
 |---|---|
-| Pruning only `ToolResultMessage`s | `AssistantMessage` tool-call blocks (which carry IDs) are kept so the model can call `context_tree_query` by ID |
+| Compacting summarized `ToolResultMessage`s | Keep each `AssistantMessage` tool-call paired with a compact result carrying its safe Raw ref, so the model can query original output |
 | Two `flushPending` delivery modes | `"runtime"` uses `pi.sendMessage` steer (safe during active agent loops); `"session"` writes via `sessionManager` directly (safe when Pi may be shutting down the session after print-mode runs) |
 | `pi.appendEntry` for persistence | Session custom entries survive restarts and branch navigation; index is rebuilt on `session_start` / `session_tree` |
 | `summarizerModel: "default"` | Reuses the active model's credentials via `ctx.modelRegistry.getApiKeyAndHeaders()` — no hidden side-channel or extra config needed |

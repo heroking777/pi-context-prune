@@ -6,6 +6,7 @@ await import("./regression-phase5.mjs");
 await import("./observability.mjs");
 await import("./observability-overhead.mjs");
 await import("./index-search.mjs");
+await import("./pruner-context-pairing.mjs");
 await import("./summary-protection.mjs");
 await import("./protection-tasks.mjs");
 await import("./hybrid-summary.mjs");
