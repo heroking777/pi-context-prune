@@ -8,8 +8,8 @@ const tool = (cmd) => `Tool: bash({"command":${JSON.stringify(cmd)}})`;
 // 1. cwd provenance: known but not a repository binding.
 const noPath = withCwd("/srv/project", `${tool("pytest -q")}\nResult (ERROR): 3 failed; FAIL`);
 const cwdRecord = expectedRecords(noPath).records.find((r) => r.c === "st");
-ok("cwd becomes a known provenance subject", cwdRecord.s === "/srv/project" && cwdRecord.p === "cwd" && cwdRecord.u === undefined);
-ok("cwd records round-trip through the parser", parseRecords(buildProtectedCore(noPath).core).every((r) => r.p === "cwd"));
+ok("flush-time cwd is never promoted to a subject", cwdRecord.s === "unknown" && cwdRecord.u === true && cwdRecord.p === undefined);
+ok("cwd-only records stay explicitly unresolved", parseRecords(buildProtectedCore(noPath).core).every((r) => r.u === true));
 const noCwd = `${tool("pytest -q")}\nResult (ERROR): 3 failed; FAIL`;
 ok("without cwd the subject stays explicitly unknown", expectedRecords(noCwd).records.find((r) => r.c === "st").u === true);
 ok("the @batch-cwd line is excluded from the LLM input", !buildProtectedCore(noPath).notesInput.includes("@batch-cwd"));
@@ -33,8 +33,8 @@ for (const [label, sha] of [["SHA-1", S1], ["SHA-256", S256]]) {
   const head = expectedRecords(raw).records.find((r) => r.r === "HEAD");
   ok(`${label} from rev-parse HEAD is promoted`, head && head.v === sha && head.s === "/srv/r");
 }
-ok("a HEAD SHA without a repo uses cwd provenance",
-  expectedRecords(withCwd("/srv/ws", `${tool("git rev-parse HEAD")}\nResult (OK): ${S1}`)).records.find((r) => r.r === "HEAD").p === "cwd");
+ok("a HEAD SHA without a repo is unresolved, not cwd-attributed",
+  expectedRecords(withCwd("/srv/ws", `${tool("git rev-parse HEAD")}\nResult (OK): ${S1}`)).records.find((r) => r.r === "HEAD").u === true);
 ok("a HEAD SHA without repo or cwd stays unresolved",
   expectedRecords(`${tool("git rev-parse HEAD")}\nResult (OK): ${S1}`).records.find((r) => r.r === "HEAD").u === true);
 

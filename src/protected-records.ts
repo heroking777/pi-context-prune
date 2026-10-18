@@ -147,18 +147,18 @@ export function expectedRecords(rawText: string): ExpectedRecords {
     records.push(record);
   };
   const cwd = batchCwd(rawText);
-  const subjectAt = (index: number): { s: string; u?: true; p?: "cwd" } => {
+  const subjectAt = (index: number): { s: string; u?: true } => {
     const subject = subjectAtIndex(rawText, index);
-    // Precedence: explicit repository/path in the tool call > session cwd
-    // (known provenance, not repository ownership) > explicit unknown.
+    // Phase57: only an explicit repository/path in the tool call establishes a
+    // subject. The flush-time session cwd is NOT call-time provenance, so it is
+    // never promoted; such records stay explicitly unresolved.
     if (subject.includes("/")) return { s: subject };
-    if (cwd && cwd.includes("/")) return { s: cwd, p: "cwd" };
     return { s: "unknown", u: true };
   };
   for (const pair of resolveIdentifiers(rawText).pairs) {
     if (pair.tier !== 1) continue;
     const label = ROLE_LABEL[pair.role];
-    if (label) push({ c: "id", r: label, ...(pair.subject.includes("/") ? { s: pair.subject } : cwd && cwd.includes("/") ? { s: cwd, p: "cwd" as const } : { s: "unknown", u: true as const }), v: pair.value });
+    if (label) push({ c: "id", r: label, ...(pair.subject.includes("/") ? { s: pair.subject } : { s: "unknown", u: true as const }), v: pair.value });
   }
   const pairs = extractStatusPairs(rawText);
   for (const pair of pairs) push({ c: "st", s: pair.subject, v: pair.status });

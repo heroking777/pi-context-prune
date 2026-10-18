@@ -189,3 +189,12 @@ separator is treated as a terminator so a multi-tool batch still yields the exac
 single-SHA output shape. cwd is captured at flush time from the session context,
 not at call time, and is not persisted in index entries — treat `p:"cwd"` as
 "session working directory", not as the historical call-time directory.
+
+Phase 57: temporal provenance rule. The session cwd available at flush time is
+NOT call-time provenance (a session can be forked/relocated, and no per-call cwd
+is recorded), so it is never promoted to a subject: records without an explicit
+absolute repository/path in their own tool call stay `s:"unknown"`, `u:true`. The
+`@batch-cwd` header and `p` field remain accepted for compatibility but are never
+produced. An explicit `-C /absolute/path` still binds; a relative `-C` (`.`,
+`./repo`) does not. Bare-HEAD capture is unchanged except that it, too, requires
+an absolute `-C` path for a subject.

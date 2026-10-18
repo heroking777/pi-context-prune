@@ -15,6 +15,7 @@ const SHA256 = /^[0-9a-f]{64}$/;
  * commands, error results and mixed output are ignored.
  */
 export function bareHeadRecords(rawText: string, cwd?: string): { records: ProtectedRecord[]; ambiguous: string[] } {
+  void cwd;
   const lines = rawText.split("\n");
   const records: ProtectedRecord[] = [];
   const bySubject = new Map<string, Set<string>>();
@@ -36,7 +37,9 @@ export function bareHeadRecords(rawText: string, cwd?: string): { records: Prote
     const output = [resultLine.slice("Result (OK):".length), ...continuation].join("\n").trim();
     if (!SHA1.test(output) && !SHA256.test(output)) { i = j; continue; }
     const repo = (command.match(/(?:^|\s)-C\s+["']?([^"'\s]+)/) ?? [])[1];
-    const subject = repo && repo.includes("/") ? { s: repo } : cwd && cwd.includes("/") ? { s: cwd, p: "cwd" as const } : { s: "unknown", u: true as const };
+    // Only an absolute explicit path establishes a subject. A relative -C and
+    // the flush-time session cwd are not call-time provenance.
+    const subject = repo && repo.startsWith("/") ? { s: repo } : { s: "unknown", u: true as const };
     records.push({ c: "id", r: "HEAD", ...subject, v: output });
     const values = bySubject.get(subject.s) ?? new Set<string>();
     values.add(output);

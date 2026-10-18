@@ -30,12 +30,12 @@ function capture(calls, cwd) {
 const one = capture([{ id: "t1", name: "bash", args: { command: "pytest -q" }, text: "3 failed; FAIL" }], "/srv/ws");
 ok("capture preserves cwd", one.batches.length === 1 && one.batches[0].cwd === "/srv/ws");
 const oneRecords = expectedRecords(`@batch-cwd ${one.batches[0].cwd}\n${one.serialized}`).records;
-ok("a status record uses cwd provenance", oneRecords.some((r) => r.c === "st" && r.s === "/srv/ws" && r.p === "cwd"));
+ok("capture carries cwd but records never attribute it", oneRecords.some((r) => r.c === "st" && r.s === "unknown" && r.u === true && r.p === undefined));
 
 // 2. Bare HEAD through the real serializer (single and multi tool).
 const single = capture([{ id: "t1", name: "bash", args: { command: "git rev-parse HEAD" }, text: S1 }], "/srv/ws");
 const singleHead = expectedRecords(`@batch-cwd /srv/ws\n${single.serialized}`).records.find((r) => r.r === "HEAD");
-ok("single-tool bare HEAD is captured", singleHead && singleHead.v === S1);
+ok("single-tool bare HEAD is captured", singleHead && singleHead.v === S1 && singleHead.u === true);
 const multi = capture([
   { id: "t1", name: "bash", args: { command: "git -C /srv/r2 rev-parse HEAD" }, text: S256 },
   { id: "t2", name: "bash", args: { command: "pytest -q" }, text: "3 failed; FAIL" },
