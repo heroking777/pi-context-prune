@@ -181,3 +181,11 @@ promoted to an active HEAD only when it is the complete OK result of a
 `git rev-parse`/`symbolic-ref` command; `log/show/diff/rev-list`, error results
 and mixed output are never promoted, and conflicting authoritative values for
 one subject fail closed.
+
+Phase 56 integration fixes: the serialized batch is pretty-printed JSON, so the
+HEAD command is on a continuation line of the `Tool:` block, not on the `Tool:`
+line itself; `bareHeadRecords` now reads the whole tool block. The `---` block
+separator is treated as a terminator so a multi-tool batch still yields the exact
+single-SHA output shape. cwd is captured at flush time from the session context,
+not at call time, and is not persisted in index entries — treat `p:"cwd"` as
+"session working directory", not as the historical call-time directory.

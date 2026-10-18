@@ -20,6 +20,7 @@ export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizerProm
   ToolCallIndexer, registerIndexSearchTool, registerQueryTool,
   buildProtectedCore, assembleHybridSummary, checkMarkerSubjects, subjectAtIndex,
   parseRecords, parseRecordsStrict, expectedRecords, verifyRecords,
+  serializeBatchForSummarizer, captureUnindexedBatchesFromSession,
   MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery, deriveSearchRef,
   formatSummaryToolCallRefs, CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY } = api;
 export const { mappedReasoningEffort } = await import("./provider-contract.mjs");

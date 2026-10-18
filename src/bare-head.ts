@@ -26,10 +26,13 @@ export function bareHeadRecords(rawText: string, cwd?: string): { records: Prote
     if (j >= lines.length) break;
     const resultLine = lines[j];
     if (!resultLine.startsWith("Result (OK):")) { i = j; continue; }
-    const command = (line.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)"/) ?? [])[1]?.replace(/\\"/g, '"') ?? "";
+    // The serialized tool block is pretty-printed JSON, so the command is on a
+    // continuation line, not on the `Tool:` line itself.
+    const block = lines.slice(i, j).join("\n");
+    const command = (block.match(/"command"\s*:\s*"((?:[^"\\]|\\.)*)"/) ?? [])[1]?.replace(/\\"/g, '"') ?? "";
     if (!AUTHORITATIVE_HEAD_COMMAND.test(command) || HISTORICAL_HEAD_COMMAND.test(command)) { i = j; continue; }
     const continuation: string[] = [];
-    for (let k = j + 1; k < lines.length && !lines[k].startsWith("Tool: "); k += 1) continuation.push(lines[k]);
+    for (let k = j + 1; k < lines.length && !lines[k].startsWith("Tool: ") && lines[k].trim() !== "---"; k += 1) continuation.push(lines[k]);
     const output = [resultLine.slice("Result (OK):".length), ...continuation].join("\n").trim();
     if (!SHA1.test(output) && !SHA256.test(output)) { i = j; continue; }
     const repo = (command.match(/(?:^|\s)-C\s+["']?([^"'\s]+)/) ?? [])[1];

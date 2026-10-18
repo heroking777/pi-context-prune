@@ -70,7 +70,7 @@ export {
   isFloorSkippedBatch,
   shouldMidTaskAutoPrune,
 } from "./src/flush-policy.js";
-export { serializeBatchForSummarizer } from "./src/batch-capture.js";
+export { serializeBatchForSummarizer, captureBatch, captureUnindexedBatchesFromSession } from "./src/batch-capture.js";
 export { ToolCallIndexer, MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery, deriveSearchRef } from "./src/indexer.js";
 export { summarizeBatches } from "./src/summarizer-batch.js";
 export { buildProtectedCore, assembleHybridSummary } from "./src/hybrid-summary.js";
