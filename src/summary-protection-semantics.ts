@@ -26,6 +26,16 @@ export interface IdentifierPair {
   tier: ProtectedTier;
 }
 
+// Commands whose output is an authoritative statement of the current HEAD.
+// Anything else (git log/show/diff/rev-list) is historical evidence only.
+const AUTHORITATIVE_HEAD = /(?:rev-parse|symbolic-ref|describe|status\s+-b)/i;
+
+function toolLineAtIndex(rawText: string, index: number): string {
+  const before = rawText.slice(0, index);
+  const toolIndex = before.lastIndexOf("\nTool:");
+  return before.slice(toolIndex + 1).split("\n")[0] ?? "";
+}
+
 /** Public alias used by the deterministic core builder. */
 export function subjectForValue(rawText: string, value: string): string {
   const index = rawText.indexOf(value);
@@ -78,6 +88,9 @@ export function resolveIdentifiers(rawText: string): IdentifierResolution {
       if (typeof value !== "string") continue;
       const nextChar = rawText[(match.index ?? 0) + match[0].length] ?? "";
       if (value.length >= MAX_IDENTIFIER_CHARS && /[A-Za-z0-9._/-]/.test(nextChar)) oversized = true;
+      // A HEAD value is only the active HEAD when an authoritative command
+      // produced it; historical log/diff values are never promoted.
+      if (spec.role === "head-sha" && !AUTHORITATIVE_HEAD.test(toolLineAtIndex(rawText, match.index ?? 0))) continue;
       pairs.push({ role: spec.role, value, subject: subjectAt(rawText, match.index ?? 0), category: spec.category, tier: spec.tier });
     }
   }

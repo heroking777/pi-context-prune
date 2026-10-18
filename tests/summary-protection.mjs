@@ -146,8 +146,8 @@ const sameShaRaw = [
 ok("the same value on two subjects still requires subject binding",
   verifyProtectedSummary(sameShaRaw, `/srv/repo-a HEAD=${X} /srv/repo-b HEAD=${X}`).ok === true);
 ok("an unknown subject with a single value needs no binding",
-  verifyProtectedSummary(`HEAD=${X}`, `HEAD=${X}`).ok === true &&
-  verifyProtectedSummary(`HEAD=${X}`, `HEAD=${Y}`).ok === false);
+  verifyProtectedSummary(`Tool: bash({"command":"git -C /srv/a rev-parse HEAD"})\nResult (OK): HEAD=${X}`, `/srv/a HEAD=${X}`).ok === true &&
+  verifyProtectedSummary(`Tool: bash({"command":"git -C /srv/a rev-parse HEAD"})\nResult (OK): HEAD=${X}`, `/srv/a HEAD=${Y}`).ok === false);
 
 ok("swapping the GitHub and VPS identifiers is rejected",
   verifyProtectedSummary(`HEAD=${A}\nDEPLOYED_SHA=${B}`, `HEAD=${B} DEPLOYED_SHA=${A}`).ok === false &&

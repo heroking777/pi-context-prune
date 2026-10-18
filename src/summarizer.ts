@@ -205,7 +205,7 @@ async function summarizeBatchImpl(
     if (hybrid && core !== null && core.ok) {
       // Stage C: deterministic core + LLM notes, validated by the same guard.
       llmText = assembleHybridSummary(core.core, llmText);
-      const hybridVerdict = verifyProtectedSummary(serialized, llmText);
+      const hybridVerdict = verifyProtectedSummary(serialized, llmText, { structuredOnly: true });
       if (!hybridVerdict.ok) {
         const reason = protectionRejectionReason(hybridVerdict);
         const effective = protectionKey !== null && session?.status === "ok"

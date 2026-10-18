@@ -4,7 +4,7 @@
 // `@rec {json}` tuples. Stage B sends only the remaining noncritical lines to the
 // LLM. Stage C concatenates the two; the caller re-validates with the single
 // guard, which compares records by exact tuple equality.
-import { verifyProtectedSummary } from "./summary-protection.js";
+import { extractProtectedItemsDetailed, verifyProtectedSummary } from "./summary-protection.js";
 import { expectedRecords, renderRecord } from "./protected-records.js";
 
 const MARKER_LINE = /^(?:UNFINISHED_TASK|TODO|NEXT(?:_ACTION|_TASK|_STEP)?|ROLLBACK|DECISION)\s*[=:]/i;
@@ -27,8 +27,13 @@ export function buildProtectedCore(rawText: string): ProtectedCore {
   if (!expected.ok) {
     return { ok: false, core: "", notesInput: "", itemCount: expected.records.length, reason: expected.reason };
   }
+  // A batch with protected content but no representable record must fail closed
+  // rather than emit an empty core that would be checked by the prose path.
+  if (expected.records.length === 0 && extractProtectedItemsDetailed(rawText).items.some((item) => item.tier === 1)) {
+    return { ok: false, core: "", notesInput: "", itemCount: 0, reason: "core-incomplete" };
+  }
   const core = expected.records.map(renderRecord).join("\n");
-  const check = verifyProtectedSummary(rawText, core);
+  const check = verifyProtectedSummary(rawText, core, { structuredOnly: true });
   if (!check.ok) {
     const missing = [...new Set(check.missing.map((item) => item.category))].join(",");
     return { ok: false, core, notesInput: "", itemCount: expected.records.length, reason: `core-invalid:${missing || "relation"}` };

@@ -197,11 +197,13 @@ export interface ProtectionVerdict {
  * omitted because it stays retrievable from the index; it is counted, not
  * enforced. A tier-1 scan truncation or tier-1 overflow fails closed.
  */
-export function verifyProtectedSummary(rawText: string, summaryText: string): ProtectionVerdict {
+export function verifyProtectedSummary(rawText: string, summaryText: string, options: { structuredOnly?: boolean } = {}): ProtectionVerdict {
   const parsed = parseRecordsStrict(summaryText);
   // Any record-intended line switches to strict structural verification; a
   // malformed record never downgrades to prose checks.
-  if (parsed.intended > 0) return verifyStructuredSummary(rawText, summaryText, parsed);
+  // Hybrid callers set `structuredOnly` so an empty record set is verified
+  // structurally instead of falling back to the weaker prose checks.
+  if (parsed.intended > 0 || options.structuredOnly === true) return verifyStructuredSummary(rawText, summaryText, parsed);
   const extraction = extractProtectedItemsDetailed(rawText);
   const tier1 = extraction.items.filter((item) => item.tier === 1);
   const tier2 = extraction.items.filter((item) => item.tier === 2);

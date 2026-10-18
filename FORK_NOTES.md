@@ -159,3 +159,15 @@ missing records, swapped subjects and conflicting identifier values are rejected
 LLM notes are also stripped of `@rec` lines at assembly so injected records can
 never become authoritative. Prose-only summaries (no `@rec` lines) keep the older
 text checks.
+
+Phase 53: real-log defects fixed. (1) A bare `FAIL/HOLD/BLOCKED` with no
+`subject: STATUS` pair is now recorded as a status record with explicit
+`u:true` unknown provenance instead of vanishing and emptying the core; a
+structured pair still wins and no extra bare record is invented. (2) A `HEAD=`
+value is only the active HEAD when an authoritative command produced it
+(`rev-parse`, `symbolic-ref`, `describe`, `status -b`); `git log/show/diff`
+values stay historical, and conflicting authoritative values still fail closed.
+(3) Records whose subject cannot be established carry `s:"unknown"` and
+`u:true` so unresolved provenance is distinguishable from a verified binding.
+Hybrid callers verify with `{ structuredOnly: true }` so an empty record set can
+never fall back to the weaker prose checks.

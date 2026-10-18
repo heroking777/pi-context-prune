@@ -16,6 +16,8 @@ export interface ProtectedRecord {
   v: string;
   /** Role label for `id` records. */
   r?: string;
+  /** True when no meaningful subject could be established (explicit unknown). */
+  u?: true;
 }
 
 export const ROLE_LABEL: Record<string, string> = {
@@ -59,12 +61,14 @@ function validateRecord(value: unknown): ProtectedRecord | null {
   if (record.r !== undefined) {
     if (record.c !== "id" || typeof record.r !== "string" || !VALID_ROLES.has(record.r)) return null;
   }
+  if (record.u !== undefined && record.u !== true) return null;
   for (const key of Object.keys(record)) {
-    if (!["c", "s", "v", "r"].includes(key)) return null;
+    if (!["c", "s", "v", "r", "u"].includes(key)) return null;
   }
-  return record.r === undefined
-    ? { c: record.c, s: record.s, v: record.v }
-    : { c: record.c, s: record.s, v: record.v, r: record.r as string };
+  const base: ProtectedRecord = { c: record.c, s: record.s, v: record.v };
+  if (record.r !== undefined) base.r = record.r as string;
+  if (record.u === true) base.u = true;
+  return base;
 }
 
 /**
@@ -130,12 +134,32 @@ export function expectedRecords(rawText: string): ExpectedRecords {
     seen.add(key);
     records.push(record);
   };
+  const subjectAt = (index: number): { s: string; u?: true } => {
+    const subject = subjectAtIndex(rawText, index);
+    // Only a structured subject (path / owner-repo) counts as verified; a tool
+    // name or "unknown" is recorded explicitly as unresolved provenance.
+    return subject.includes("/") ? { s: subject } : { s: "unknown", u: true };
+  };
   for (const pair of resolveIdentifiers(rawText).pairs) {
     if (pair.tier !== 1) continue;
     const label = ROLE_LABEL[pair.role];
-    if (label) push({ c: "id", r: label, s: pair.subject, v: pair.value });
+    if (label) push({ c: "id", r: label, ...(pair.subject.includes("/") ? { s: pair.subject } : { s: "unknown", u: true as const }), v: pair.value });
   }
-  for (const pair of extractStatusPairs(rawText)) push({ c: "st", s: pair.subject, v: pair.status });
+  const pairs = extractStatusPairs(rawText);
+  for (const pair of pairs) push({ c: "st", s: pair.subject, v: pair.status });
+  // A bare FAIL/HOLD with no structured pair still has to survive: record it
+  // with explicit unknown provenance instead of inventing a subject.
+  if (pairs.length === 0) {
+    for (const item of extraction.items.filter((entry) => entry.tier === 1 && entry.category === "status")) {
+      let from = 0;
+      for (;;) {
+        const index = rawText.indexOf(item.value, from);
+        if (index < 0) break;
+        from = index + item.value.length;
+        push({ c: "st", ...subjectAt(index), v: item.value });
+      }
+    }
+  }
   const markers = extraction.items.filter((item) => item.tier === 1 && MARKER_CATEGORIES.has(item.category));
   for (const item of markers) {
     let from = 0;
@@ -143,7 +167,7 @@ export function expectedRecords(rawText: string): ExpectedRecords {
       const index = rawText.indexOf(item.value, from);
       if (index < 0) break;
       from = index + item.value.length;
-      push({ c: item.category, s: subjectAtIndex(rawText, index), v: item.value });
+      push({ c: item.category, ...subjectAt(index), v: item.value });
     }
   }
   if (records.length > MAX_RECORDS) return { ok: false, records, reason: "record-overflow" };
@@ -157,7 +181,7 @@ export interface RecordVerification {
 }
 
 function keyOf(record: ProtectedRecord): string {
-  return JSON.stringify([record.c, record.r ?? null, record.s, record.v]);
+  return JSON.stringify([record.c, record.r ?? null, record.s, record.v, record.u === true]);
 }
 
 /**

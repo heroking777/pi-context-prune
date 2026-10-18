@@ -86,7 +86,7 @@ ok("mixed lines are fully excluded from the LLM input",
 ok("mixed-line core still passes the guard", verifyProtectedSummary(mixed, mixedCore.core).ok === true);
 
 // 8. Two protected subjects on one line are both preserved.
-const twoOnOneLine = `Tool: bash({"command":"git -C /srv/repo-a status"})\nResult (OK): HEAD=${A}; DEPLOYED_SHA=${B}`;
+const twoOnOneLine = `Tool: bash({"command":"git -C /srv/repo-a rev-parse HEAD"})\nResult (OK): HEAD=${A}; DEPLOYED_SHA=${B}`;
 const twoCore = buildProtectedCore(twoOnOneLine);
 const twoRec = parseRecords(twoCore.core);
 ok("two protected subjects on one line are both kept", twoRec.some((r) => r.r === "HEAD" && r.v === A) && twoRec.some((r) => r.r === "DEPLOYED_SHA" && r.v === B));
