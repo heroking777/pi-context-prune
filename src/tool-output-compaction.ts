@@ -8,10 +8,8 @@ import type { ToolCallIndexer } from "./indexer.js";
 import type { ToolCallRecord } from "./types.js";
 import { CUSTOM_TYPE_INDEX } from "./types.js";
 import {
-  cleanRawDetails,
   rawStorageLimit,
   readCompleteRaw,
-  removeVerifiedTempSource,
   shouldCaptureRaw,
 } from "./raw-integrity.js";
 import type { VerifiedRaw } from "./raw-integrity.js";
@@ -209,22 +207,18 @@ async function handleToolResult(
     const record = rawOnlyRecord(event, captured.raw, currentTurnIndex(ctx));
     pi.appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: [record] });
     indexer.indexPersistedRecord(record);
-    const sourceRemoved = removeVerifiedTempSource(captured.raw);
     const marker = outcome ? COMPACTION_MARKER : "contextPruneRawIntegrity";
     const baseText = outcome?.text ?? block.text;
-    const visibleText = captured.raw.sourcePath && sourceRemoved
-      ? baseText.split(captured.raw.sourcePath).join("[full output saved in Pruner Raw]")
-      : baseText;
     const metadata = {
       rawRef,
       rawSha256: captured.raw.sha256,
       rawByteLength: captured.raw.byteLength,
-      sourceFileRemoved: sourceRemoved,
+      sourceFilePreserved: Boolean(captured.raw.sourcePath),
       ...(outcome ? { kind: outcome.kind, compactedChars: outcome.text.length } : {}),
     };
     return {
-      content: [{ ...block, text: `${visibleText}\n\n[Raw output ref: ${rawRef}; SHA-256 ${captured.raw.sha256}; ${captured.raw.byteLength} bytes; retrieve with context_tree_query.]` }],
-      details: detailsWithMarker(cleanRawDetails(event.details, sourceRemoved), marker, metadata),
+      content: [{ ...block, text: `${baseText}\n\n[Raw output ref: ${rawRef}; SHA-256 ${captured.raw.sha256}; ${captured.raw.byteLength} bytes; retrieve with context_tree_query.]` }],
+      details: detailsWithMarker(event.details, marker, metadata),
     };
   } catch {
     return rawFailure(event, "raw-capture-failed");

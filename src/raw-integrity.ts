@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstatSync, readFileSync, realpathSync, statSync, unlinkSync } from "node:fs";
+import { lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, relative, sep } from "node:path";
 import type { ToolResultEvent } from "@earendil-works/pi-coding-agent";
@@ -26,8 +26,6 @@ export interface VerifiedRaw {
   sha256: string;
   byteLength: number;
   sourcePath?: string;
-  sourceSize?: number;
-  sourceMtimeMs?: number;
 }
 
 export type RawReadResult =
@@ -123,8 +121,7 @@ export function readCompleteRaw(event: ToolResultEvent): RawReadResult {
       if (text === undefined) return { ok: false, reason: "full-output-not-valid-utf8" };
       return {
         ok: true,
-        raw: { text, sha256: digest(bytes), byteLength: bytes.length, sourcePath: path,
-          sourceSize: after.size, sourceMtimeMs: after.mtimeMs },
+        raw: { text, sha256: digest(bytes), byteLength: bytes.length, sourcePath: path },
       };
     } catch {
       return { ok: false, reason: "full-output-unavailable" };
@@ -167,34 +164,4 @@ export function verifyRawRecord(record: ToolCallRecord): string | undefined {
     return "raw-integrity-check-failed";
   }
   return undefined;
-}
-
-export function removeVerifiedTempSource(raw: VerifiedRaw): boolean {
-  if (!raw.sourcePath || raw.sourceSize === undefined || raw.sourceMtimeMs === undefined) return true;
-  try {
-    const path = tmpPath(raw.sourcePath);
-    if (!path || path !== raw.sourcePath) return false;
-    const before = lstatSync(path);
-    if (before.isSymbolicLink() || !before.isFile() || before.size !== raw.sourceSize || before.mtimeMs !== raw.sourceMtimeMs) return false;
-    const bytes = readFileSync(path);
-    if (bytes.length !== raw.byteLength || digest(bytes) !== raw.sha256) return false;
-    unlinkSync(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export function cleanRawDetails(details: unknown, removePath: boolean): Record<string, unknown> {
-  const clean = details && typeof details === "object" && !Array.isArray(details)
-    ? { ...details as Record<string, unknown> }
-    : {};
-  if (removePath) delete clean.fullOutputPath;
-  const truncation = clean.truncation;
-  if (truncation && typeof truncation === "object" && !Array.isArray(truncation)) {
-    const cleanTruncation = { ...truncation as Record<string, unknown> };
-    delete cleanTruncation.content;
-    clean.truncation = cleanTruncation;
-  }
-  return clean;
 }

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -55,12 +55,13 @@ function makePruner(indexer, persisted) {
   return handler;
 }
 
-async function runHooks(order, event, indexer = new ToolCallIndexer()) {
+async function runHooks(order, event, indexer = new ToolCallIndexer(), downstreamObserver = () => {}) {
   const persisted = [];
   const pruner = makePruner(indexer, persisted);
+  const observer = (result) => { downstreamObserver(result); };
   const handlers = order === "pruner-minimizer"
-    ? [["pruner", pruner], ["toolresult-minimize", minimize]]
-    : [["toolresult-minimize", minimize], ["pruner", pruner]];
+    ? [["pruner", pruner], ["toolresult-minimize", minimize], ["downstream-observer", observer]]
+    : [["toolresult-minimize", minimize], ["pruner", pruner], ["downstream-observer", observer]];
   const runner = Object.create(ExtensionRunner.prototype);
   runner.extensions = handlers.map(([path, handler]) => ({ path, handlers: new Map([["tool_result", [handler]]]) }));
   runner.createContext = () => ctx;
@@ -135,11 +136,29 @@ for (const order of ["pruner-minimizer", "minimizer-pruner"]) {
   const id = `core-path-${order}`;
   const details = { truncation: bigSnapshot.truncation, fullOutputPath: bigSnapshot.fullOutputPath };
   const input = event(id, `${bigSnapshot.content}\n[Full output: ${bigSnapshot.fullOutputPath}]`, details);
-  const integrated = await runHooks(order, input);
+  let downstream;
+  const sentinel = { consumer: "later-extension" };
+  details.downstreamSentinel = sentinel;
+  const integrated = await runHooks(order, input, new ToolCallIndexer(), (result) => {
+    const path = result.details?.fullOutputPath;
+    downstream = typeof path === "string" && existsSync(path)
+      ? { path, sha256: sha(readFileSync(path)), sentinel: result.details.downstreamSentinel }
+      : { path, missing: true };
+  });
   const restored = await queryBytes(integrated.indexer, id);
   ok(`${order} uses verified core fullOutputPath as complete Raw`, sha(restored) === sha(bigExpected) && integrated.indexer.getRecord(id)?.__contextPruneRawByteLength === bigExpected.length);
-  ok(`${order} removes duplicate temporary source only after durable Raw append`, !existsSync(bigSnapshot.fullOutputPath) && !integrated.result.details?.fullOutputPath);
-  if (existsSync(bigSnapshot.fullOutputPath)) rmSync(bigSnapshot.fullOutputPath, { force: true });
+  ok(`${order} preserves Pi-owned source and downstream details`, existsSync(bigSnapshot.fullOutputPath) && integrated.result.details?.fullOutputPath === bigSnapshot.fullOutputPath && downstream?.path === bigSnapshot.fullOutputPath && downstream?.sha256 === sha(bigExpected) && JSON.stringify(downstream?.sentinel) === JSON.stringify(sentinel), `resultPath=${integrated.result.details?.fullOutputPath}; downstream=${JSON.stringify(downstream)}; keys=${Object.keys(integrated.result.details ?? {}).join(",")}`);
+  const rawRecords = integrated.persisted.flatMap((entry) => entry.data?.toolCalls ?? []).filter((record) => record.toolCallId === id);
+  const rawBackings = rawRecords.filter((record) => record.__contextPruneRawOnly && record.resultText.length > 0);
+  const rawSessionBytes = rawBackings.reduce((total, record) => total + Buffer.byteLength(record.resultText, "utf8"), 0);
+  const retainedPiFileBytes = statSync(bigSnapshot.fullOutputPath).size;
+  const serializedSessionBytes = Buffer.byteLength(JSON.stringify(integrated.persisted), "utf8");
+  ok(`${order} persists one verified Raw backing without duplicate session output`, rawBackings.length === 1 && rawSessionBytes === bigExpected.length && rawRecords.length === 1);
+  console.log(`INFO raw-storage order=${order} sessionRawBytes=${rawSessionBytes} retainedPiFileBytes=${retainedPiFileBytes} serializedSessionEntryBytes=${serializedSessionBytes} recordCount=${rawRecords.length}`);
+  rmSync(bigSnapshot.fullOutputPath, { force: true });
+  const rebuilt = new ToolCallIndexer();
+  rebuilt.reconstructFromSession({ sessionManager: { getBranch: () => integrated.persisted.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) } });
+  ok(`${order} retrieves session-authoritative Raw after test-owned source cleanup`, !existsSync(bigSnapshot.fullOutputPath) && sha(await queryBytes(rebuilt, id)) === sha(bigExpected));
 }
 
 const lineHeavy = `${"line\n".repeat(2001)}`;
@@ -186,18 +205,31 @@ for (let i = 0; i < 512; i++) quotaIndexer.indexPersistedRecord({
 });
 const quota = await runHooks("pruner-minimizer", event("quota-hit", "q".repeat(10_000)), quotaIndexer);
 ok("Raw-only record quota is bounded and reports downstream limitation", !quota.indexer.getRecord("quota-hit") && quota.result.content[0].text.includes("raw-session-record-limit"));
+const byteQuotaIndexer = new ToolCallIndexer();
+byteQuotaIndexer.indexPersistedRecord({
+  toolCallId: "byte-quota-existing", toolName: "bash", args: {}, resultText: "",
+  isError: false, turnIndex: 0, timestamp: 0, __contextPruneRawOnly: true,
+  __contextPruneRawSha256: "b".repeat(64), __contextPruneRawByteLength: 64 * 1024 * 1024,
+});
+const byteQuota = await runHooks("pruner-minimizer", event("byte-quota-hit", "q".repeat(10_000)), byteQuotaIndexer);
+ok("64 MiB session Raw-byte quota fails closed without adding a record", !byteQuota.indexer.getRecord("byte-quota-hit") && byteQuota.result.content[0].text.includes("raw-session-byte-limit"));
 
 const storedId = "medium-b";
 const summaryIndexer = mediumB.indexer;
 const summaryEntries = mediumB.persisted;
+const sessionBytesBeforeSummary = Buffer.byteLength(JSON.stringify(summaryEntries), "utf8");
 summaryIndexer.addBatch({ toolCalls: [{ toolCallId: storedId, toolName: "bash", args: {}, resultText: "shortened by later minimizer", isError: false }], turnIndex: 2, timestamp: 2 }, {
   appendEntry: (customType, data) => summaryEntries.push({ type: "custom", customType, data }),
 });
 const summaryUpdate = summaryEntries.at(-1).data.toolCalls[0];
-ok("summary indexing does not duplicate or overwrite the sole full Raw entry", summaryIndexer.getRecord(storedId)?.resultText === medium && summaryUpdate.resultText === "" && summaryIndexer.isSummarized(storedId));
+const persistedRawRecords = summaryEntries.flatMap((entry) => entry.data?.toolCalls ?? []).filter((record) => record.toolCallId === storedId);
+const fullRawRecords = persistedRawRecords.filter((record) => record.__contextPruneRawOnly && record.resultText.length > 0);
+const sessionBytesAfterSummary = Buffer.byteLength(JSON.stringify(summaryEntries), "utf8");
+ok("summary indexing retains one full session Raw and stores only a metadata update", summaryIndexer.getRecord(storedId)?.resultText === medium && summaryUpdate.resultText === "" && summaryIndexer.isSummarized(storedId) && fullRawRecords.length === 1 && persistedRawRecords.length === 2);
+console.log(`INFO raw-storage-after-summary rawBytes=${Buffer.byteLength(fullRawRecords[0]?.resultText ?? "", "utf8")} sessionBytesBefore=${sessionBytesBeforeSummary} sessionBytesAfter=${sessionBytesAfterSummary} metadataGrowth=${sessionBytesAfterSummary - sessionBytesBeforeSummary}`);
 const rebuiltIndexer = new ToolCallIndexer();
 rebuiltIndexer.reconstructFromSession({ sessionManager: { getBranch: () => summaryEntries.map((entry) => ({ type: "custom", customType: entry.customType, data: entry.data })) } });
-ok("session reconstruction merges summary metadata while retaining byte-verified Raw", rebuiltIndexer.getRecord(storedId)?.resultText === medium && rebuiltIndexer.isSummarized(storedId));
+ok("session reconstruction merges summary metadata and restores the original SHA-verified Raw", rebuiltIndexer.getRecord(storedId)?.resultText === medium && rebuiltIndexer.isSummarized(storedId) && sha(await queryBytes(rebuiltIndexer, storedId)) === sha(medium));
 
 if (lineSnapshot.fullOutputPath && existsSync(lineSnapshot.fullOutputPath)) rmSync(lineSnapshot.fullOutputPath, { force: true });
 if (errorCore.fullOutputPath && existsSync(errorCore.fullOutputPath)) rmSync(errorCore.fullOutputPath, { force: true });
