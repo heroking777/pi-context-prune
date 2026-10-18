@@ -33,3 +33,15 @@ const result = await pi.tool.execute("c", { toolCallIds: ["t4-t5"] }, undefined,
 const text = result.content.map((part) => part.text).join("\n");
 ok("context_tree_query accepts a range and returns each record",
   text.includes("payload-3") && text.includes("payload-4") && !text.includes("payload-5") && !text.includes("not found"));
+
+const single = await pi.tool.execute("c", { toolCallIds: ["t4"] }, undefined, undefined, {});
+const duplicate = await pi.tool.execute("c", { toolCallIds: ["t4-t5", "t4"] }, undefined, undefined, {});
+const singleText = single.content[0].text;
+const duplicateText = duplicate.content[0].text;
+const rangeText = text;
+const duplicateBaselineChars = rangeText.length + singleText.length;
+ok("overlapping refs preserve raw content once and avoid duplicate prompt bytes",
+  (duplicateText.match(/## toolRef: t4\n/g) ?? []).length === 1 &&
+  duplicateText.includes("payload-3") && duplicateText.includes("payload-4") &&
+  duplicateText.length < duplicateBaselineChars);
+console.log(`DUPLICATE_QUERY_CHARS baseline=${duplicateBaselineChars} after=${duplicateText.length} avoided=${duplicateBaselineChars - duplicateText.length}`);

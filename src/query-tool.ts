@@ -23,7 +23,8 @@ export function registerQueryTool(pi: ExtensionAPI, indexer: ToolCallIndexer): v
       const foundRecords: Record<string, any> = {};
       const blocks: string[] = [];
 
-      const requested = params.toolCallIds.flatMap((id) => indexer.expandRef(id));
+      // Overlapping ranges and explicit refs must not emit the same raw record twice.
+      const requested = [...new Set(params.toolCallIds.flatMap((id) => indexer.expandRef(id)))];
 
       for (const id of requested) {
         const record = indexer.getRecord(id);
