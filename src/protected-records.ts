@@ -123,7 +123,6 @@ export function parseRecords(text: string): ProtectedRecord[] {
   return parseRecordsStrict(text).records;
 }
 
-
 export interface ExpectedRecords {
   ok: boolean;
   records: ProtectedRecord[];
