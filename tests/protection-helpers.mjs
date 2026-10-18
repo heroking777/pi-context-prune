@@ -13,7 +13,7 @@ export const PROTECTED_BATCH = {
   turnIndex: 1, timestamp: 1,
   toolCalls: [
     { toolName: "bash", toolCallId: "b1", args: { command: "sha" }, resultText: `FINAL_SHA=${SHA(1)} ${PATH}`, isError: false },
-    { toolName: "bash", toolCallId: "b2", args: { command: "test" }, resultText: "IntegrityError: bad; exit code 3; status FAIL", isError: true },
+    { toolName: "bash", toolCallId: "b2", args: { command: "test" }, resultText: "IntegrityError: bad; jra-gate: FAIL", isError: true },
     { toolName: "bash", toolCallId: "b3", args: { command: "decide" }, resultText: "DECISION=KEEP_RAW UNFINISHED_TASK: resume tracing ROLLBACK=restore snapshot", isError: false },
   ],
 };
@@ -27,9 +27,10 @@ export function fakeCtx(behaviour, session = "s1") {
       const body = userText.split("<tool-call-batch>")[1]?.split("</tool-call-batch>")[0] ?? "";
       if (behaviour === "429") { const e = new Error("429 Too Many Requests"); e.status = 429; throw e; }
       if (behaviour === "error") throw new Error("provider exploded");
+      const pairs = [...body.matchAll(/([A-Za-z0-9_.:/-]{2,40})\s*[:=]\s*(FAIL|HOLD|BLOCKED)\b/gi)].map((m) => `${m[1]}: ${m[2]}`);
       const text = behaviour === "lossy"
         ? "Compressed summary without any identifiers."
-        : extractProtectedItems(body).map((item) => item.value).join("\n");
+        : extractProtectedItems(body).map((item) => item.value).join("\n") + "\n" + pairs.join("\n");
       const result = { stopReason: "stop", content: [{ type: "text", text }],
         usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 }, timestamp: Date.now() };
       if (behaviour === "slow-ok") {

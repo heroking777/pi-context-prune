@@ -422,20 +422,22 @@ export default function (pi: ExtensionAPI) {
 
         try {
           if (!shouldSkipOversized) {
-            // Write one hidden summary message per turn and index its tool calls.
-            // `display: false` keeps the summary in future LLM context and session
-            // history without printing the full markdown block into Pi's main window.
+            // Phase37: persist the index entry FIRST, then commit the summary.
+            // Tier-2 detail may be omitted from the summary only while the raw
+            // output is retrievable, so the index write must succeed before the
+            // summary is exposed. If indexing fails, the summary is never shown
+            // and the batch stays on the existing restore path.
             if (delivery === "runtime") {
+              indexer.registerSummaryRefs(summaryRefs);
+              indexer.addBatch(batch, pi);
               pi.sendMessage(
                 { customType: CUSTOM_TYPE_SUMMARY, content: summaryText, display: false, details: batchDetails },
                 { deliverAs: "steer" }
               );
-              indexer.registerSummaryRefs(summaryRefs);
-              indexer.addBatch(batch, pi);
             } else {
-              appendSummaryMessage(summaryText, batchDetails);
               indexer.registerSummaryRefs(summaryRefs);
               persistBatchIndex(batch, appendEntry);
+              appendSummaryMessage(summaryText, batchDetails);
             }
             recordBatchOutcome(batch, "summarized", { indexPersisted: true });
           } else {

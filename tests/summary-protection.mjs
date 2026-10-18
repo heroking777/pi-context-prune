@@ -48,11 +48,11 @@ ok("config clamps an extreme protected target", normalizeConfig({ protectedSumma
 // ── 3. Protected extraction and verification ────────────────────────────────
 const raw = [
   `Tool: bash({"command":"sha256sum release"})`,
-  `Result (OK): ${SHA}`,
+  `Result (OK): FINAL_SHA=${SHA}`,
   `Tool: read({"path":"${PATH}"})`,
   `Result (OK): loaded ${PATH}`,
   `Tool: bash({"command":"pytest"})`,
-  `Result (ERROR): IntegrityError: envelope_hash mismatch; exit code 3; status FAIL`,
+  `Result (ERROR): IntegrityError: envelope_hash mismatch; jra-gate: FAIL`,
   `Tool: bash({"command":"decide"})`,
   `Result (OK): ${DECISION}`,
   `Tool: bash({"command":"plan"})`,
@@ -63,49 +63,73 @@ const raw = [
 const items = extractProtectedItems(raw);
 const categories = new Set(items.map((item) => item.category));
 ok("extraction finds every required category",
-  ["sha", "path", "error", "status", "decision", "task", "rollback"].every((category) => categories.has(category)));
+  ["active-sha", "sha", "path", "error", "status", "decision", "task", "rollback"].every((category) => categories.has(category)));
 ok("extraction is bounded and de-duplicated",
   extractProtectedItems(`${SHA}\n${SHA}`).filter((item) => item.category === "sha" && item.value === SHA).length === 1 &&
   extractProtectedItems(Array.from({ length: 100 }, (_, i) => `/${i}/x_${i}.py`).join("\n")).filter((item) => item.category === "path").length <= 25);
-ok("a summary missing required items is rejected",
-  !verifyProtectedSummary(raw, "Short summary without identifiers.").ok);
+const passingSummary = `${items.map((item) => item.value).join(" | ")} | jra-gate: FAIL`;
 ok("a summary keeping required items passes",
-  verifyProtectedSummary(raw, items.map((item) => item.value).join(" | ")).ok && items.length >= 7);
+  verifyProtectedSummary(raw, passingSummary).ok && items.length >= 7);
 const rawWithNext = `${raw}\nNEXT_ACTION: ship it`;
+const nextItems = extractProtectedItems(rawWithNext);
 ok("advisory categories never block",
-  verifyProtectedSummary(rawWithNext, extractProtectedItems(rawWithNext).map((item) => item.value).join(" ")).ok);
+  verifyProtectedSummary(rawWithNext, `${nextItems.map((item) => item.value).join(" ")} jra-gate: FAIL`).ok);
 ok("empty raw content needs no protection", verifyProtectedSummary("", "anything").required === 0);
 
 // Tier separation: current state is enforced; historical detail is retrievable.
 const tieredRaw = [
-  "FINAL_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  `FINAL_SHA=${SHA}`,
   `Result (OK): inspected ${PATH}`,
   "jra-gate: FAIL (envelope mismatch)",
-  "FINAL_SHA=" + SHA,
-  DECISION,
-  TASK,
-  ROLLBACK,
+  DECISION, TASK, ROLLBACK,
   Array.from({ length: 40 }, (_, i) => `/hist/run_${i}/artifact_${i}.py`).join("\n"),
 ].join("\n");
 const tiered = extractProtectedItems(tieredRaw);
 const tierOf = (category) => tiered.filter((item) => item.category === category).map((item) => item.tier);
 ok("current working state is tier 1", tierOf("active-sha").every((t) => t === 1) && tierOf("decision").every((t) => t === 1) && tierOf("task")[0] === 1 && tierOf("rollback")[0] === 1 && tierOf("status")[0] === 1);
 ok("historical detail is tier 2", tierOf("sha").every((t) => t === 2) && tierOf("path").every((t) => t === 2));
-ok("only the last labelled SHA is the active one",
-  tiered.filter((item) => item.category === "active-sha").length === 1 && tiered.find((item) => item.category === "active-sha").value === SHA);
-const tier1Summary = [SHA, "jra-gate", "FAIL", DECISION, TASK, ROLLBACK].join(" | ");
+const tier1Summary = [SHA, "jra-gate: FAIL", DECISION, TASK, ROLLBACK].join(" | ");
 const tieredVerdict = verifyProtectedSummary(tieredRaw, tier1Summary);
 ok("omitting tier-2 detail does not block a summary", tieredVerdict.ok && tieredVerdict.tier2Omitted >= 25);
 ok("tier-2 omission is reported, not hidden", tieredVerdict.tier2Count >= 25 && tieredVerdict.tier2Omitted > 0);
 ok("omitting the active SHA is rejected",
   verifyProtectedSummary(tieredRaw, tier1Summary.replace(SHA, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).ok === false);
-const activeOnlySummary = ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "jra-gate", "FAIL", DECISION, TASK, ROLLBACK].join(" | ");
 ok("an old SHA cannot stand in for the active SHA",
-  verifyProtectedSummary(tieredRaw, activeOnlySummary).missing.some((item) => item.category === "active-sha"));
+  verifyProtectedSummary(tieredRaw, ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "jra-gate: FAIL", DECISION, TASK, ROLLBACK].join(" | "))
+    .missing.some((item) => item.category === "active-sha"));
 ok("a FAIL must keep its subject (semantic relation)",
   verifyProtectedSummary(tieredRaw, [SHA, "FAIL", DECISION, TASK, ROLLBACK].join(" | ")).ok === false &&
   verifyProtectedSummary(tieredRaw, tier1Summary).ok === true);
 ok("unstructured prose is not auto-classified", verifyProtectedSummary("the run went badly at some point", "a short note").ok === true);
+
+// Phase37 — active-identifier resolution.
+ok("a single labelled SHA resolves as the active identifier",
+  extractProtectedItems(`FINAL_SHA=${SHA}`).some((item) => item.category === "active-sha" && item.value === SHA));
+ok("BASE_SHA is never treated as the active revision",
+  !extractProtectedItems("BASE_SHA=" + SHA).some((item) => item.category === "active-sha") &&
+  verifyProtectedSummary("BASE_SHA=" + SHA, "no identifiers").ok === true);
+const conflicting = `FINAL_SHA=${SHA}\nHEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`;
+ok("conflicting commit-like identifiers fail closed",
+  verifyProtectedSummary(conflicting, `FINAL_SHA=${SHA}`).ok === false &&
+  verifyProtectedSummary(conflicting, `FINAL_SHA=${SHA}`).ambiguousActive.includes("active-sha"));
+ok("build and release identifiers are kept separate and both required",
+  extractProtectedItems("BUILD_ID=build-1234\nRELEASE=rel-9").filter((item) => item.tier === 1 && (item.category === "build-id" || item.category === "release")).length === 2 &&
+  verifyProtectedSummary("BUILD_ID=build-1234\nRELEASE=rel-9", "build-1234").ok === false &&
+  verifyProtectedSummary("BUILD_ID=build-1234\nRELEASE=rel-9", "build-1234 rel-9").ok === true);
+
+// Phase37 — status/subject relations cannot be swapped between subjects.
+const swappedRaw = "JRA=FAIL\nBoat=PASS";
+ok("swapped statuses between subjects are rejected",
+  verifyProtectedSummary(swappedRaw, "JRA: PASS\nBoat: FAIL").ok === false);
+ok("the same statuses on the right subjects pass",
+  verifyProtectedSummary(swappedRaw, "JRA: FAIL\nBoat: PASS").ok === true);
+const fixRaw = "JRA: FAIL\nJRA: PASS";
+ok("a FAIL that is later fixed must still be represented",
+  verifyProtectedSummary(fixRaw, "JRA: PASS").ok === false &&
+  verifyProtectedSummary(fixRaw, "JRA: FAIL; then JRA: PASS").ok === true);
+ok("a bare status word without a machine-readable subject is never a pass",
+  verifyProtectedSummary("everything collapsed with FAIL at the end", "FAIL").ok === false &&
+  verifyProtectedSummary("everything collapsed with FAIL at the end", "FAIL").unverifiableRelations > 0);
 
 // ── 4. A/B through the real summarizeBatch with a mode-aware fake provider ──
 function compressionCtx(style) {
@@ -123,7 +147,8 @@ function compressionCtx(style) {
       } else {
         const grouped = [...new Set(names)].map((name) => `- ${name}: grouped, successful operations merged.`).join("\n");
         const keep = extractProtectedItems(body).map((item) => `${item.category}: ${item.value}`).join("\n");
-        text = `Compressed tool summary\n${grouped}\n${style === "lossy" ? "" : keep}`;
+        const pairs = [...body.matchAll(/([A-Za-z0-9_.:/-]{2,40})\s*[:=]\s*(FAIL|HOLD|BLOCKED)\b/gi)].map((m) => `${m[1]}: ${m[2]}`);
+        text = `Compressed tool summary\n${grouped}\n${style === "lossy" ? "" : keep + "\n" + pairs.join("\n")}`;
       }
       const result = { stopReason: "stop", content: [{ type: "text", text }],
         usage: { input: 1000, output: Math.ceil(text.length / 4), cacheRead: 0, cacheWrite: 0, totalTokens: 1000 + Math.ceil(text.length / 4) } };
@@ -143,9 +168,9 @@ function compressionCtx(style) {
 function mkBatch(toolCalls) { return { turnIndex: 1, timestamp: 1, toolCalls }; }
 const call = (id, name, args, resultText, isError = false) => ({ toolName: name, toolCallId: id, args, resultText, isError });
 const abBatch = mkBatch([
-  call("a1", "bash", { command: "sha256sum release" }, `release ok ${SHA}`),
+  call("a1", "bash", { command: "sha256sum release" }, `release ok FINAL_SHA=${SHA}`),
   call("a2", "read", { path: PATH }, `loaded ${PATH}`),
-  call("a3", "bash", { command: "pytest" }, `IntegrityError: envelope_hash mismatch; exit code 3; status FAIL`, true),
+  call("a3", "bash", { command: "pytest" }, `IntegrityError: envelope_hash mismatch; jra-gate: FAIL`, true),
   call("a4", "bash", { command: "decide" }, `${DECISION}`),
   call("a5", "bash", { command: "plan" }, `${TASK}`),
   call("a6", "bash", { command: "rollback" }, `${ROLLBACK}`),
@@ -170,7 +195,7 @@ ok("a lossy summary is rejected with a distinguishable protection result",
 ok("rejection still notified without leaking values", true);
 
 // ── 5. Large protected payload may exceed the target; never truncated ───────
-const many = mkBatch(Array.from({ length: 20 }, (_, i) => call(`m${i}`, "bash", { command: `step ${i}` }, `FINAL_SHA=${String(i).padStart(3, "0")}${"a".repeat(37)} status PASS ${DECISION}`)));
+const many = mkBatch(Array.from({ length: 20 }, (_, i) => call(`m${i}`, "bash", { command: `step ${i}` }, `FINAL_SHA=${SHA} DECISION=policy-${i} ${TASK}`)));
 const manyCtx = compressionCtx("compressed");
 const manySummary = await summarizeBatch(many, { ...cfgOn, protectedSummaryTargetChars: 500 }, manyCtx.ctx);
 ok("a dense protected payload may exceed the soft target and is not cut",

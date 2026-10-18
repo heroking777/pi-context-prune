@@ -13,9 +13,12 @@
 // has a machine-readable structure; anything else is reported, never silently
 // passed.
 import { createHash } from "node:crypto";
+import { resolveActiveIdentifiers, checkStatusRelations } from "./summary-protection-semantics.js";
 
 export type ProtectedCategory =
   | "active-sha"
+  | "build-id"
+  | "release"
   | "sha"
   | "path"
   | "error"
@@ -84,10 +87,11 @@ interface Extractor {
   countsTowardScan: boolean;
 }
 
-// Tier 1 — current working state.
+// Tier 1 — current working state. Active commit/build/release identifiers are
+// resolved separately (see ./summary-protection-semantics.ts) so that
+// BASE_SHA is never treated as the current revision and conflicting values
+// fail closed.
 const TIER1_EXTRACTORS: Extractor[] = [
-  { category: "active-sha", tier: 1, enforce: "last", countsTowardScan: false, exact: true,
-    regex: /\b(?:FINAL_SHA|BASE_SHA|CURRENT_SHA|ACTIVE_SHA|DEPLOYED_SHA|HEAD|BUILD_ID|RELEASE)\s*[=:]\s*([A-Za-z0-9._/-]{6,})/gi, group: 1 },
   { category: "decision", tier: 1, enforce: "all", countsTowardScan: true,
     regex: /\bDECISION\s*[=:]\s*([^\s,;]{1,80})/gi, group: 1 },
   { category: "decision", tier: 1, enforce: "all", countsTowardScan: true,
@@ -122,11 +126,6 @@ const TIER2_EXTRACTORS: Extractor[] = [
     regex: /\b(re-?verified|tests?\s+passed|tests?\s+failed)\b/gi, group: 1 },
 ];
 
-const RELATION_REGEXES = [
-  /([A-Za-z0-9_.:/-]{2,40})\s*[:=]\s*(FAIL|HOLD|BLOCKED)\b/g,
-  /\b(FAIL|HOLD|BLOCKED)\s+(?:for|on|in)\s+([A-Za-z0-9_.:/-]{2,40})/g,
-];
-
 function collect(rawText: string, extractors: Extractor[], budget: number): { items: ProtectedItem[]; overflow: ProtectedCategory[]; scanned: number; truncated: boolean } {
   const seen = new Set<string>();
   const out: ProtectedItem[] = [];
@@ -158,33 +157,19 @@ function collect(rawText: string, extractors: Extractor[], budget: number): { it
   return { items: out, overflow: [...overflow], scanned, truncated };
 }
 
-function collectRelations(rawText: string): ProtectedRelation[] {
-  const seen = new Set<string>();
-  const out: ProtectedRelation[] = [];
-  for (const regex of RELATION_REGEXES) {
-    for (const match of rawText.matchAll(new RegExp(regex.source, regex.flags))) {
-      const first = match[1];
-      const second = match[2];
-      const status = /^(FAIL|HOLD|BLOCKED)$/i.test(first) ? first : second;
-      const subject = status === first ? second : first;
-      if (!status || !subject) continue;
-      const key = `${status.toUpperCase()}\u0000${subject.toLowerCase()}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      if (out.length >= MAX_PER_CATEGORY) break;
-      out.push({ status: status.toUpperCase(), subject });
-    }
-  }
-  return out;
-}
-
 export interface ProtectionExtraction {
   items: ProtectedItem[];
   overflowCategories: ProtectedCategory[];
   scanned: number;
   truncated: boolean;
   tier2Truncated: boolean;
-  relations: ProtectedRelation[];
+  ambiguousActive: string[];
+}
+
+function collectTier1(rawText: string): { items: ProtectedItem[]; overflowCategories: ProtectedCategory[]; scanned: number; truncated: boolean; ambiguousActive: string[] } {
+  const scan = collect(rawText, TIER1_EXTRACTORS, MAX_TIER1_SCAN);
+  const active = resolveActiveIdentifiers(rawText);
+  return { items: [...active.items, ...scan.items], overflowCategories: scan.overflow, scanned: scan.scanned, truncated: scan.truncated, ambiguousActive: active.ambiguous };
 }
 
 /**
@@ -193,17 +178,18 @@ export interface ProtectionExtraction {
  * reported without blocking.
  */
 export function extractProtectedItemsDetailed(rawText: string): ProtectionExtraction {
-  const tier1 = collect(rawText, TIER1_EXTRACTORS, MAX_TIER1_SCAN);
+  const tier1 = collectTier1(rawText);
   const tier2 = collect(rawText, TIER2_EXTRACTORS, MAX_TIER2_SCAN);
   return {
     items: [...tier1.items, ...tier2.items],
-    overflowCategories: tier1.overflow,
+    overflowCategories: tier1.overflowCategories,
     scanned: tier1.scanned + tier2.scanned,
     truncated: tier1.truncated,
     tier2Truncated: tier2.truncated,
-    relations: collectRelations(rawText),
+    ambiguousActive: tier1.ambiguousActive,
   };
 }
+
 
 export function extractProtectedItems(rawText: string): ProtectedItem[] {
   return extractProtectedItemsDetailed(rawText).items;
@@ -226,6 +212,10 @@ export interface ProtectionVerdict {
   tier2Omitted: number;
   relationsChecked: number;
   unresolvedRelations: ProtectedRelation[];
+  contradictions: ProtectedRelation[];
+  /** Semantic content that cannot be verified mechanically (never a pass). */
+  unverifiableRelations: number;
+  ambiguousActive: string[];
 }
 
 /**
@@ -244,18 +234,21 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
     required += 1;
     if (!isPresent(summaryText, item.value, item.exact)) missing.push(item);
   }
+  // Conflicting active identifiers can never be verified: fail closed.
+  for (const category of extraction.ambiguousActive) {
+    required += 1;
+    missing.push({ category: category as ProtectedItem["category"], value: "<ambiguous>", exact: true, tier: 1 });
+  }
   let tier2Omitted = 0;
   for (const item of tier2) {
     if (!isPresent(summaryText, item.value, item.exact)) tier2Omitted += 1;
     else advisoryMissing.push(item);
   }
-  const unresolvedRelations = extraction.relations.filter(
-    (relation) => !isPresent(summaryText, relation.subject, false) || !isPresent(summaryText, relation.status, false),
-  );
-  const missingCategories: ProtectedCategory[] = missing.map((item) => item.category);
-  if (unresolvedRelations.length > 0) missingCategories.push("relation");
+  const relations = checkStatusRelations(rawText, summaryText);
+  const unresolvedRelations = [...relations.unresolved, ...relations.contradictions];
   return {
-    ok: missing.length === 0 && extraction.overflowCategories.length === 0 && !extraction.truncated && unresolvedRelations.length === 0,
+    ok: missing.length === 0 && extraction.overflowCategories.length === 0 && !extraction.truncated &&
+      unresolvedRelations.length === 0 && relations.unverifiable === 0,
     checked: extraction.items.length,
     required,
     missing,
@@ -265,8 +258,11 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
     tier1Count: tier1.length,
     tier2Count: tier2.length,
     tier2Omitted,
-    relationsChecked: extraction.relations.length,
+    relationsChecked: unresolvedRelations.length + relations.unverifiable,
     unresolvedRelations,
+    contradictions: relations.contradictions,
+    unverifiableRelations: relations.unverifiable,
+    ambiguousActive: extraction.ambiguousActive,
   };
 }
 
