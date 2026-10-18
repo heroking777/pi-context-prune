@@ -16,7 +16,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { loadConfig } from "./src/config.js";
 import { captureBatch, captureUnindexedBatchesFromSession, groupBatchesByMode } from "./src/batch-capture.js";
-import { summarizeBatch, summarizeBatches } from "./src/summarizer.js";
+import { summarizeBatch } from "./src/summarizer.js";
+import { summarizeBatches } from "./src/summarizer-batch.js";
 import { ToolCallIndexer } from "./src/indexer.js";
 import { pruneMessages } from "./src/pruner.js";
 import { annotateWithUnprunedCount, countUnprunedToolCalls } from "./src/reminder.js";

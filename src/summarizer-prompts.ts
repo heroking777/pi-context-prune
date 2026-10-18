@@ -75,12 +75,19 @@ Keep verbatim, once each, with its subject on the same line:
 - rollback: "ROLLBACK=..." with the condition
 Never drop a protected line to fit the target length.`;
 
-export type SummarizerPromptMode = "default" | "concise" | "faithful" | "protected";
+export const SYSTEM_PROMPT_HYBRID_NOTES = `Compress the noncritical notes from this tool-call batch for the agent.
+Bullets only, no preamble, no headings.
+Merge repeated successes; drop noise, progress output and completed intermediate detail.
+Do NOT repeat or rephrase identifiers, commit/build/release values, statuses, decisions, unfinished tasks, next actions or rollback lines: those are preserved separately by the program and must not be restated.
+Describe only what happened and any explanation that helps the next step.`;
+
+export type SummarizerPromptMode = "default" | "concise" | "faithful" | "protected" | "hybrid";
 
 /** Default target when protected compression is enabled but no target is set. */
 export const PROTECTED_SUMMARY_DEFAULT_TARGET_CHARS = 3900;
 
 export function summarizerPromptMode(config?: Partial<ContextPruneConfig> | null): SummarizerPromptMode {
+  if (config?.protectedSummaryHybrid === true) return "hybrid";
   if (config?.protectedSummaryCompression === true) return "protected";
   if (config && (config.summarizerPromptMode === "concise" || config.summarizerPromptMode === "faithful")) {
     return config.summarizerPromptMode;
@@ -91,6 +98,7 @@ export function summarizerPromptMode(config?: Partial<ContextPruneConfig> | null
 export function summarizerSystemPrompt(config?: Partial<ContextPruneConfig> | null): string {
   const mode = summarizerPromptMode(config);
   if (mode === "protected") return protectedCompressionPrompt(config);
+  if (mode === "hybrid") return SYSTEM_PROMPT_HYBRID_NOTES;
   if (mode === "concise") return SYSTEM_PROMPT_CONCISE;
   if (mode === "faithful") return SYSTEM_PROMPT_FAITHFUL;
   return SYSTEM_PROMPT;

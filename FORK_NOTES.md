@@ -108,3 +108,21 @@ semantics instead (§5).
 4. Rollback: keep the previously deployed `dist/index.js` (and its SHA-256) beside the
    staging copy and restore it verbatim; no settings migration is required because no
    option default changed.
+
+## 7. Hybrid protected summaries (opt-in, Phase 47)
+
+`protectedSummaryHybrid` (default `false`) replaces prompt-only protected
+summaries with a three-stage pipeline:
+
+1. **Deterministic core** (`src/hybrid-summary.ts`) extracts Tier-1 state from
+   the raw batch (active identifiers with role + subject, status/subject pairs,
+   unresolved errors, decisions, every unfinished task with its next action and
+   rollback instructions) and renders it in the exact form the guard validates.
+2. **LLM notes** receive only the remaining non-critical lines; protected lines
+   are removed from the model input.
+3. **Assembly** concatenates core + notes and re-validates the result with the
+   *same* `verifyProtectedSummary` guard. Any ambiguity, overflow, or guard
+   failure fails closed and keeps the raw output on the existing restore path.
+
+The mode never makes the model the authority for Tier-1 values, and default
+behaviour (all options at their defaults) is unchanged.

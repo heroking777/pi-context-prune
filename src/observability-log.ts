@@ -24,7 +24,7 @@ const CONFIG_KEYS = [
   "midTaskThresholdChars", "rateLimitCooldownMs", "minRawCharsForSummary",
   "summarizerModel", "summarizerThinking", "summarizerMaxOutputTokens",
   "conciseSummaryMode", "summarizerPromptMode", "evidenceAppendix", "evidenceAppendixMaxEntries",
-  "protectedSummaryCompression", "protectedSummaryTargetChars",
+  "protectedSummaryCompression", "protectedSummaryTargetChars", "protectedSummaryHybrid",
 ] as const;
 
 export type FlushReason =

@@ -230,6 +230,8 @@ export interface ContextPruneConfig {
   protectedSummaryCompression: boolean;
   /** Soft character target for the compressed summary body. */
   protectedSummaryTargetChars: number;
+  /** Phase47: deterministic core + LLM notes (opt-in, default false). */
+  protectedSummaryHybrid: boolean;
 }
 
 export type SummarizerPromptMode = "default" | "concise" | "faithful" | "protected";
@@ -262,6 +264,7 @@ export const DEFAULT_CONFIG: ContextPruneConfig = {
   // Phase31: protected compression off by default; 3900-char soft target.
   protectedSummaryCompression: false,
   protectedSummaryTargetChars: 3900,
+  protectedSummaryHybrid: false,
 };
 
 // ── Captured batch ─────────────────────────────────────────────────────────

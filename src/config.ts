@@ -95,6 +95,7 @@ export function normalizeConfig(existing: unknown): ContextPruneConfig {
         Number.isInteger(merged.protectedSummaryTargetChars) && (merged.protectedSummaryTargetChars as number) >= 500
           ? Math.min(merged.protectedSummaryTargetChars as number, 20000)
           : DEFAULT_CONFIG.protectedSummaryTargetChars,
+      protectedSummaryHybrid: merged.protectedSummaryHybrid === true,
     };
 }
 

@@ -26,6 +26,12 @@ export interface IdentifierPair {
   tier: ProtectedTier;
 }
 
+/** Public alias used by the deterministic core builder. */
+export function subjectForValue(rawText: string, value: string): string {
+  const index = rawText.indexOf(value);
+  return index < 0 ? "unknown" : subjectAt(rawText, index);
+}
+
 /** Nearest preceding tool-call subject (path, owner/repo or tool name). */
 function subjectAt(rawText: string, index: number): string {
   const before = rawText.slice(0, index);

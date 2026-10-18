@@ -9,6 +9,7 @@ import type {
 } from "./types.js";
 import { serializeBatchForSummarizer } from "./batch-capture.js";
 import { summarizerSystemPrompt } from "./summarizer-prompts.js";
+import { assembleHybridSummary, buildProtectedCore } from "./hybrid-summary.js";
 import { resolveModel, summarizerThinkingOptions, receivedTextChars } from "./summarizer-request.js";
 import {
   protectionFailureKey,
@@ -67,10 +68,19 @@ async function summarizeBatchImpl(
   if (options.signal?.aborted) throw new Error("summarizeBatch: aborted before start");
 
   const serialized = serializeBatchForSummarizer(batch);
+  const hybrid = config.protectedSummaryHybrid === true;
+  const protectedEnabled = config.protectedSummaryCompression === true || hybrid;
+  // Phase47: the deterministic core is built before any provider call. When it
+  // cannot be verified the batch fails closed with no API usage.
+  const core = hybrid ? buildProtectedCore(serialized) : null;
+  if (core !== null && !core.ok) {
+    const reason = core.reason === "core-overflow" ? "overflow" : "missing";
+    return protectionFailureResult(protectionFailureKey(serialized, config), reason);
+  }
   // Phase32/33: a batch whose compressed summary already failed in THIS session
   // is not re-sent on a later automatic flush while its content and policy are
   // unchanged. Other sessions are unaffected.
-  const protectionKey = config.protectedSummaryCompression === true ? protectionFailureKey(serialized, config) : null;
+  const protectionKey = protectedEnabled ? protectionFailureKey(serialized, config) : null;
   const session = protectionKey !== null ? resolveProtectionSessionKey(ctx) : null;
   // Phase35: reserve the session slot and same-batch lock BEFORE any provider
   // call; both are released in `finally`, so 429/abort/errors cannot leak them.
@@ -99,8 +109,9 @@ async function summarizeBatchImpl(
       return null;
     }
 
+    const providerBody = core !== null ? (core.notesInput.length > 0 ? core.notesInput : "(no noncritical notes)") : serialized;
     const userMessage =
-      summarizerSystemPrompt(config) + "\n\n<tool-call-batch>\n" + serialized + "\n</tool-call-batch>";
+      summarizerSystemPrompt(config) + "\n\n<tool-call-batch>\n" + providerBody + "\n</tool-call-batch>";
 
     // Use the provider-owned stream API directly. The compatibility registry
     // facade still exposes auth/header resolution, but no longer exposes a
@@ -183,7 +194,7 @@ async function summarizeBatchImpl(
       return null;
     }
 
-    const llmText = response.content
+    let llmText = response.content
       .filter((c: any) => c.type === "text")
       .map((c: any) => c.text)
       .join("\n");
@@ -191,7 +202,19 @@ async function summarizeBatchImpl(
     // Phase31: when protected compression is enabled, a summary that dropped an
     // enforced protected item is rejected. Returning null routes the batch
     // through the existing restore path, so raw output is never lost.
-    if (config.protectedSummaryCompression === true) {
+    if (hybrid && core !== null && core.ok) {
+      // Stage C: deterministic core + LLM notes, validated by the same guard.
+      llmText = assembleHybridSummary(core.core, llmText);
+      const hybridVerdict = verifyProtectedSummary(serialized, llmText);
+      if (!hybridVerdict.ok) {
+        const reason = protectionRejectionReason(hybridVerdict);
+        const effective = protectionKey !== null && session?.status === "ok"
+          ? rememberProtectionFailure(session.key, protectionKey, reason)
+          : reason;
+        ctx.ui.notify(`pruner: hybrid summary rejected (${effective}); raw tool output kept pending`, "error");
+        return protectionFailureResult(protectionKey ?? "", effective, hybridVerdict.missing);
+      }
+    } else if (config.protectedSummaryCompression === true) {
       const verdict = verifyProtectedSummary(serialized, llmText);
       if (!verdict.ok) {
         const reason = protectionRejectionReason(verdict);
@@ -262,34 +285,3 @@ export function summarizeBatch(
  *   • Parallel calls give similar end-to-end latency to a single merged call while
  *     keeping the summaries strictly separated.
  */
-export async function summarizeBatches(
-  batches: CapturedBatch[],
-  config: ContextPruneConfig,
-  ctx: ExtensionContext,
-  options: SummarizeBatchesOptions = {}
-): Promise<Array<SummarizeOutcome>> {
-  if (batches.length === 0) return [];
-  // Single batch — delegate to the single-batch path (no extra overhead)
-  if (batches.length === 1) {
-    return [
-      await withPendingBatchMetrics(batches, () => summarizeBatch(batches[0], config, ctx, {
-        signal: options.signal,
-        onTextProgress: (receivedChars) => {
-          options.onBatchTextProgress?.(0, 1, batches[0], receivedChars);
-        },
-      })),
-    ];
-  }
-
-  // Multiple batches — run in parallel; each produces its own SummarizeResult
-  return withPendingBatchMetrics(batches, () => Promise.all(
-    batches.map((batch, index) =>
-      summarizeBatch(batch, config, ctx, {
-        signal: options.signal,
-        onTextProgress: (receivedChars) => {
-          options.onBatchTextProgress?.(index, batches.length, batch, receivedChars);
-        },
-      })
-    )
-  ));
-}
