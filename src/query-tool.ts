@@ -23,7 +23,9 @@ export function registerQueryTool(pi: ExtensionAPI, indexer: ToolCallIndexer): v
       const foundRecords: Record<string, any> = {};
       const blocks: string[] = [];
 
-      for (const id of params.toolCallIds) {
+      const requested = params.toolCallIds.flatMap((id) => indexer.expandRef(id));
+
+      for (const id of requested) {
         const record = indexer.getRecord(id);
 
         if (!record) {

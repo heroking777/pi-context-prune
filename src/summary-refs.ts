@@ -51,16 +51,40 @@ export function normalizeSummaryToolCallRefs(details: unknown): SummaryToolCallR
   return [];
 }
 
+/** Collapses consecutive `tN` refs into `tA-tB` ranges (bounded, lossless). */
+export function formatRefRanges(refs: SummaryToolCallRef[]): string {
+  const ids = refs.map((ref) => ref.shortId);
+  const numeric = ids.every((id) => /^t\d+$/.test(id));
+  if (!numeric) return ids.map((id) => `\`${id}\``).join(", ");
+  const numbers = [...new Set(ids.map((id) => Number(id.slice(1))))].sort((a, b) => a - b);
+  const parts: string[] = [];
+  let start: number | null = null;
+  let prev: number | null = null;
+  const flush = () => {
+    if (start === null || prev === null) return;
+    parts.push(start === prev ? `\`t${start}\`` : `\`t${start}-t${prev}\``);
+    start = null;
+    prev = null;
+  };
+  for (const n of numbers) {
+    if (start === null) { start = n; prev = n; continue; }
+    if (prev !== null && n === prev + 1) { prev = n; continue; }
+    flush();
+    start = n;
+    prev = n;
+  }
+  flush();
+  return parts.join(", ");
+}
+
 export function formatSummaryToolCallRefs(refs: SummaryToolCallRef[]): string {
-  const searchHint =
-    "Other pruned outputs not listed here can be found by keyword with `context_index_search`.";
+  const searchHint = "Other pruned outputs: `context_index_search`.";
   if (refs.length === 0) {
     return `\n\n---\n${searchHint}`;
   }
-  const refList = refs.map((ref) => `\`${ref.shortId}\``).join(", ");
   return (
-    `\n\n---\n**Summarized tool refs**: ${refList}\n` +
-    `Use \`context_tree_query\` with these refs to retrieve the original full outputs. ${searchHint}`
+    `\n\n---\n**Refs**: ${formatRefRanges(refs)}\n` +
+    `Use \`context_tree_query\` (single refs or \`tA-tB\` ranges). ${searchHint}`
   );
 }
 

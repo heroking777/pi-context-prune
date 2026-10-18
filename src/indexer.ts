@@ -171,6 +171,21 @@ export class ToolCallIndexer {
   /**
    * Resolve a short alias or a full toolCallId to the canonical toolCallId.
    */
+  /**
+   * Expands a `tA-tB` short-ref range into individual refs (bounded). Returns the
+   * input unchanged when it is not a range.
+   */
+  expandRef(ref: string): string[] {
+    const match = /^t(\d+)-t(\d+)$/.exec(ref.trim());
+    if (!match) return [ref];
+    const start = Number(match[1]);
+    const end = Number(match[2]);
+    if (!Number.isInteger(start) || !Number.isInteger(end) || end < start) return [ref];
+    const count = end - start + 1;
+    if (count > 200) return [ref];
+    return Array.from({ length: count }, (_, offset) => `t${start + offset}`);
+  }
+
   resolveToolCallId(toolCallIdOrAlias: string): string | undefined {
     if (this.index.has(toolCallIdOrAlias)) return toolCallIdOrAlias;
     if (this.ambiguousSearchRefs.has(toolCallIdOrAlias)) return undefined;

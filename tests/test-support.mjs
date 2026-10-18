@@ -22,7 +22,7 @@ export const { summarizerThinkingOptions, summarizerSystemPrompt, summarizerProm
   parseRecords, parseRecordsStrict, expectedRecords, verifyRecords,
   serializeBatchForSummarizer, captureUnindexedBatchesFromSession,
   MAX_SEARCH_QUERY_CHARS, sanitizeSearchLimit, validateSearchQuery, deriveSearchRef,
-  formatSummaryToolCallRefs, CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY } = api;
+  formatSummaryToolCallRefs, formatRefRanges, CUSTOM_TYPE_INDEX, CUSTOM_TYPE_SUMMARY } = api;
 export const { mappedReasoningEffort } = await import("./provider-contract.mjs");
 export const state = { pass: 0, fail: 0 };
 export const ok = (name, cond, extra = "") => {

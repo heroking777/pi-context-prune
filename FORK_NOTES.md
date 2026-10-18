@@ -212,3 +212,10 @@ input drops exact duplicate non-protected lines (first occurrence kept, order
 preserved). On the 60 real batches: notes input −10.1% characters, core build
 −59% wall time, protected core byte-identical (same SHA-256 over all cores), same
 54/60 acceptance and same fail-closed set. Default/Protected paths untouched.
+
+Default-path optimisation: the summary ref footer now lists consecutive `tN`
+refs as `tA-tB` ranges (with one compact instruction line), and
+`context_tree_query` expands a range to its members. This is lossless (every ref
+is still derivable and directly usable) and cuts the footer by ~70% on real
+summaries, reducing the context that is re-inserted and re-read on every
+subsequent call.
