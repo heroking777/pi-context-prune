@@ -35,22 +35,77 @@ export function renderRecord(record: ProtectedRecord): string {
   return PREFIX + JSON.stringify(record);
 }
 
-/** Parses structured records from arbitrary summary text (malformed lines ignored). */
-export function parseRecords(text: string): ProtectedRecord[] {
-  const out: ProtectedRecord[] = [];
-  for (const line of text.split("\n")) {
-    const trimmed = line.trim();
-    if (!trimmed.startsWith(PREFIX)) continue;
-    try {
-      const parsed = JSON.parse(trimmed.slice(PREFIX.length));
-      if (parsed && typeof parsed.c === "string" && typeof parsed.s === "string" && typeof parsed.v === "string") {
-        out.push({ c: parsed.c, s: parsed.s, v: parsed.v, ...(typeof parsed.r === "string" ? { r: parsed.r } : {}) });
-      }
-    } catch {
-      // A malformed record is not a record; the guard fails closed separately.
-    }
+const VALID_CATEGORIES = new Set(["id", "st", "task", "next", "rollback", "decision", "error"]);
+const VALID_ROLES = new Set(Object.values(ROLE_LABEL));
+
+/** A line is record-intended when it starts with `@rec` as a token. */
+export function isRecordIntended(line: string): boolean {
+  return /^@rec(?:\s|$|\{)/.test(line.trim());
+}
+
+export interface StrictParse {
+  ok: boolean;
+  records: ProtectedRecord[];
+  malformed: number;
+  intended: number;
+}
+
+function validateRecord(value: unknown): ProtectedRecord | null {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.c !== "string" || !VALID_CATEGORIES.has(record.c)) return null;
+  if (typeof record.s !== "string" || record.s.length === 0) return null;
+  if (typeof record.v !== "string" || record.v.length === 0) return null;
+  if (record.r !== undefined) {
+    if (record.c !== "id" || typeof record.r !== "string" || !VALID_ROLES.has(record.r)) return null;
   }
-  return out;
+  for (const key of Object.keys(record)) {
+    if (!["c", "s", "v", "r"].includes(key)) return null;
+  }
+  return record.r === undefined
+    ? { c: record.c, s: record.s, v: record.v }
+    : { c: record.c, s: record.s, v: record.v, r: record.r as string };
+}
+
+/**
+ * Strict parser for structured summaries. Every `@rec`-intended line must be a
+ * valid record; malformed, unknown-category or unsupported-shape lines make the
+ * whole parse invalid (the caller then fails closed instead of downgrading to
+ * prose verification). Exact duplicate tuples collapse; near-duplicates are kept
+ * and rejected later by set verification.
+ */
+export function parseRecordsStrict(text: string): StrictParse {
+  const records: ProtectedRecord[] = [];
+  const seen = new Set<string>();
+  let malformed = 0;
+  let intended = 0;
+  for (const line of text.split("\n")) {
+    if (!isRecordIntended(line)) continue;
+    intended += 1;
+    const body = line.trim().slice(PREFIX.length).trim();
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(body);
+    } catch {
+      malformed += 1;
+      continue;
+    }
+    const record = validateRecord(parsed);
+    if (!record) {
+      malformed += 1;
+      continue;
+    }
+    const key = JSON.stringify(record);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    records.push(record);
+  }
+  return { ok: malformed === 0, records, malformed, intended };
+}
+
+/** Convenience wrapper returning only the parsed records. */
+export function parseRecords(text: string): ProtectedRecord[] {
+  return parseRecordsStrict(text).records;
 }
 
 export interface ExpectedRecords {
@@ -95,32 +150,42 @@ export function expectedRecords(rawText: string): ExpectedRecords {
   return { ok: true, records };
 }
 
+export interface RecordVerification {
+  missing: ProtectedRecord[];
+  unexpected: ProtectedRecord[];
+  contradictions: ProtectedRecord[];
+}
+
 function keyOf(record: ProtectedRecord): string {
   return JSON.stringify([record.c, record.r ?? null, record.s, record.v]);
 }
 
-export interface RecordVerification {
-  missing: ProtectedRecord[];
-  contradictions: ProtectedRecord[];
-}
-
 /**
- * Exact tuple comparison. A record is accepted only when category, role, value
- * and subject all match; the same value under another subject is a
- * contradiction, not a pass.
+ * Bidirectional exact set comparison. A record is valid only when it matches an
+ * expected tuple exactly; extra records, missing records, a value attached to a
+ * different subject, or a conflicting value for the same role/subject are all
+ * rejected.
  */
 export function verifyRecords(expected: ProtectedRecord[], actual: ProtectedRecord[]): RecordVerification {
+  const expectedKeys = new Set(expected.map(keyOf));
   const actualKeys = new Set(actual.map(keyOf));
   const missing: ProtectedRecord[] = [];
+  const unexpected: ProtectedRecord[] = [];
   const contradictions: ProtectedRecord[] = [];
   for (const record of expected) {
     if (actualKeys.has(keyOf(record))) continue;
-    const sameValue = actual.some(
-      (candidate) => candidate.c === record.c && candidate.v === record.v && (candidate.r ?? null) === (record.r ?? null),
+    const sameIdentity = actual.some(
+      (candidate) => candidate.c === record.c && (candidate.r ?? null) === (record.r ?? null) && candidate.s === record.s,
     );
-    (sameValue ? contradictions : missing).push(record);
+    const sameValueOtherSubject = actual.some(
+      (candidate) => candidate.c === record.c && (candidate.r ?? null) === (record.r ?? null) && candidate.v === record.v,
+    );
+    (sameIdentity || sameValueOtherSubject ? contradictions : missing).push(record);
   }
-  return { missing, contradictions };
+  for (const record of actual) {
+    if (!expectedKeys.has(keyOf(record))) unexpected.push(record);
+  }
+  return { missing, unexpected, contradictions };
 }
 
 /** Maps a record back to the guard's item shape for reporting. */
@@ -134,27 +199,30 @@ export function recordToItem(record: ProtectedRecord): ProtectedItem {
  * (category, role, subject, value) tuple. A matching value under a different
  * subject is a contradiction, never a pass.
  */
-export function verifyStructuredSummary(rawText: string, summaryText: string, structured: ProtectedRecord[]): ProtectionVerdict {
+export function verifyStructuredSummary(rawText: string, summaryText: string, parsed: StrictParse): ProtectionVerdict {
   const extraction = extractProtectedItemsDetailed(rawText);
   const expected = expectedRecords(rawText);
-  const verification = expected.ok ? verifyRecords(expected.records, structured) : { missing: [], contradictions: [] };
+  const verification = expected.ok
+    ? verifyRecords(expected.records, parsed.records)
+    : { missing: [], unexpected: [], contradictions: [] };
+  const contradictions = [...verification.contradictions, ...verification.unexpected];
   const missing = verification.missing.map(recordToItem);
-  const identifierContradictions = verification.contradictions
+  const identifierContradictions = contradictions
     .filter((record) => record.c === "id")
     .map((record) => ({ role: record.r ?? "", value: record.v, subject: record.s, category: "active-sha" as const, tier: 1 as const }));
-  const statusContradictions = verification.contradictions
+  const statusContradictions = contradictions
     .filter((record) => record.c === "st")
     .map((record) => ({ status: record.v, subject: record.s }));
-  const unboundTasks = verification.contradictions
+  const unboundTasks = contradictions
     .filter((record) => record.c !== "id" && record.c !== "st")
     .map(recordToItem);
   const tier2 = extraction.items.filter((item) => item.tier === 2);
   const tier2Omitted = tier2.filter((item) => !summaryText.includes(item.value)).length;
-  const ok = expected.ok && missing.length === 0 && verification.contradictions.length === 0 &&
+  const ok = parsed.ok && expected.ok && missing.length === 0 && contradictions.length === 0 &&
     !extraction.truncated && !extraction.oversized && extraction.overflowCategories.length === 0;
   return {
     ok,
-    checked: structured.length,
+    checked: parsed.records.length,
     required: expected.records.length,
     missing,
     advisoryMissing: [],
@@ -164,13 +232,13 @@ export function verifyStructuredSummary(rawText: string, summaryText: string, st
     tier1Count: expected.records.length,
     tier2Count: tier2.length,
     tier2Omitted,
-    relationsChecked: structured.filter((record) => record.c === "st").length,
+    relationsChecked: parsed.records.filter((record) => record.c === "st").length,
     unresolvedRelations: [],
     contradictions: statusContradictions,
     identifierUnresolved: [],
     identifierContradictions,
     unboundTasks,
-    unverifiableRelations: 0,
+    unverifiableRelations: parsed.malformed,
     ambiguousActive: extraction.ambiguousActive,
   };
 }

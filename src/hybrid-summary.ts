@@ -49,6 +49,12 @@ export function buildProtectedCore(rawText: string): ProtectedCore {
 
 /** Assembles the final summary: deterministic core first, LLM notes second. */
 export function assembleHybridSummary(core: string, llmNotes: string): string {
-  const notes = llmNotes.trim();
+  // LLM notes are untrusted: drop any record-intended line so injected records
+  // can never add to or modify the authoritative protected state.
+  const notes = llmNotes
+    .split("\n")
+    .filter((line) => !/^@rec(?:\s|$|\{)/.test(line.trim()))
+    .join("\n")
+    .trim();
   return notes.length === 0 ? `## Protected state\n${core}` : `## Protected state\n${core}\n\n## Notes\n${notes}`;
 }

@@ -12,6 +12,7 @@ await import("./hybrid-summary.mjs");
 await import("./hybrid-adversarial.mjs");
 await import("./hybrid-limits.mjs");
 await import("./hybrid-records.mjs");
+await import("./hybrid-strict.mjs");
 await import("./protection-retry.mjs");
 await import("./protection-capacity.mjs");
 console.log(`\nRESULT pass=${state.pass} fail=${state.fail}`);

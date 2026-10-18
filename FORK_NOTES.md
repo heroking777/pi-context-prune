@@ -149,3 +149,13 @@ tuples for exact equality, so a matching value under a different subject, a
 subject mentioned in surrounding prose, a prefix-overlapping path, or an
 `unknown` subject are all rejected. Free-form prose summaries still fall back to
 the text checks and are reported as less verifiable than structured records.
+
+Phase 51: structured parsing is strict and verification is set-exact. Any
+`@rec`-intended line switches the summary to structural verification; malformed
+JSON, missing fields, invalid category/role combinations or unsupported shapes
+fail closed instead of falling back to prose checks. Verification compares
+expected and actual record sets in both directions, so extra/injected records,
+missing records, swapped subjects and conflicting identifier values are rejected.
+LLM notes are also stripped of `@rec` lines at assembly so injected records can
+never become authoritative. Prose-only summaries (no `@rec` lines) keep the older
+text checks.
