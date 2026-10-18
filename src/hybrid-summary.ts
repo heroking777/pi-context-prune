@@ -5,7 +5,7 @@
 // LLM. Stage C concatenates the two; the caller re-validates with the single
 // guard, which compares records by exact tuple equality.
 import { extractProtectedItemsDetailed, verifyProtectedSummary } from "./summary-protection.js";
-import { expectedRecords, renderRecord } from "./protected-records.js";
+import { expectedRecords, parseRecordsStrict, renderRecord, verifyRecords } from "./protected-records.js";
 
 const MARKER_LINE = /^(?:UNFINISHED_TASK|TODO|NEXT(?:_ACTION|_TASK|_STEP)?|ROLLBACK|DECISION)\s*[=:]/i;
 
@@ -33,12 +33,20 @@ export function buildProtectedCore(rawText: string): ProtectedCore {
     return { ok: false, core: "", notesInput: "", itemCount: 0, reason: "core-incomplete" };
   }
   const core = expected.records.map(renderRecord).join("\n");
-  const check = verifyProtectedSummary(rawText, core, { structuredOnly: true });
-  if (!check.ok) {
-    const missing = [...new Set(check.missing.map((item) => item.category))].join(",");
-    return { ok: false, core, notesInput: "", itemCount: expected.records.length, reason: `core-invalid:${missing || "relation"}` };
+  // Verify the rendered core against the records we just derived instead of
+  // re-extracting the whole batch a third time.
+  const parsedCore = parseRecordsStrict(core);
+  const comparison = verifyRecords(expected.records, parsedCore.records);
+  const flags = expected.flags;
+  const coreOk = parsedCore.ok && comparison.missing.length === 0 && comparison.unexpected.length === 0 &&
+    comparison.contradictions.length === 0 && !flags?.truncated && !flags?.oversized && (flags?.overflow.length ?? 0) === 0;
+  if (!coreOk) {
+    return { ok: false, core, notesInput: "", itemCount: expected.records.length, reason: "core-invalid" };
   }
   const values = new Set(expected.records.map((record) => record.v));
+  // Duplicate identical non-protected lines add nothing to the model input; keep
+  // the first occurrence and preserve order.
+  const seenLines = new Set<string>();
   const notesInput = rawText
     .split("\n")
     .filter((line) => {
@@ -47,6 +55,8 @@ export function buildProtectedCore(rawText: string): ProtectedCore {
       if (MARKER_LINE.test(trimmed)) return false;
       if (/^@(?:rec|batch-cwd)(?:\s|$|\{)/.test(trimmed)) return false;
       for (const value of values) if (value.length > 0 && trimmed.includes(value)) return false;
+      if (seenLines.has(trimmed)) return false;
+      seenLines.add(trimmed);
       return true;
     })
     .join("\n");

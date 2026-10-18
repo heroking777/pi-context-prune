@@ -205,3 +205,10 @@ Phase 58 attribution rules: a subject must be established by a line-anchored
 records, and a malformed tool block does not inherit the next block's result.
 Tool-block detection is line-anchored so a result body containing the literal
 text `Tool: ` cannot create a false boundary.
+
+Final optimisation (Phase 59): hybrid core building reuses its own record set for
+verification instead of re-extracting (one scan instead of three) and the notes
+input drops exact duplicate non-protected lines (first occurrence kept, order
+preserved). On the 60 real batches: notes input −10.1% characters, core build
+−59% wall time, protected core byte-identical (same SHA-256 over all cores), same
+54/60 acceptance and same fail-closed set. Default/Protected paths untouched.

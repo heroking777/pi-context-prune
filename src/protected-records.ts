@@ -128,6 +128,8 @@ export interface ExpectedRecords {
   ok: boolean;
   records: ProtectedRecord[];
   reason?: string;
+  /** Extraction flags, reused by callers to avoid a second scan. */
+  flags?: { truncated: boolean; oversized: boolean; overflow: string[] };
 }
 
 /**
@@ -136,8 +138,9 @@ export interface ExpectedRecords {
  */
 export function expectedRecords(rawText: string): ExpectedRecords {
   const extraction = extractProtectedItemsDetailed(rawText);
-  if (extraction.ambiguousActive.length > 0) return { ok: false, records: [], reason: `ambiguous:${extraction.ambiguousActive.join(",")}` };
-  if (extraction.oversized) return { ok: false, records: [], reason: "oversized" };
+  const flags = { truncated: extraction.truncated, oversized: extraction.oversized, overflow: extraction.overflowCategories };
+  if (extraction.ambiguousActive.length > 0) return { ok: false, records: [], reason: `ambiguous:${extraction.ambiguousActive.join(",")}`, flags };
+  if (extraction.oversized) return { ok: false, records: [], reason: "oversized", flags };
   const records: ProtectedRecord[] = [];
   const seen = new Set<string>();
   const push = (record: ProtectedRecord) => {
@@ -200,8 +203,8 @@ export function expectedRecords(rawText: string): ExpectedRecords {
   const head = bareHeadRecords(rawText, cwd);
   if (head.ambiguous.length > 0) return { ok: false, records, reason: `ambiguous:${head.ambiguous.join(",")}` };
   for (const record of head.records) push(record);
-  if (records.length > MAX_RECORDS) return { ok: false, records, reason: "record-overflow" };
-  return { ok: true, records };
+  if (records.length > MAX_RECORDS) return { ok: false, records, reason: "record-overflow", flags };
+  return { ok: true, records, flags };
 }
 
 export interface RecordVerification {
