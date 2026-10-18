@@ -7,6 +7,8 @@ import {
   normalizeSummaryToolCallRefs,
   type SummaryToolCallRef,
 } from "./summary-refs.js";
+import { searchIndexedRecords } from "./indexer-search.js";
+import { mergePersistedRawUpdate } from "./indexer-raw-merge.js";
 
 export interface IndexSearchOptions {
   limit?: unknown;
@@ -110,10 +112,7 @@ export class ToolCallIndexer {
       if (entry.type === "custom" && (entry as any).customType === CUSTOM_TYPE_INDEX) {
         const data = (entry as any).data as IndexEntryData;
         if (data && Array.isArray(data.toolCalls)) {
-          for (const toolCall of data.toolCalls) {
-            this.index.set(toolCall.toolCallId, toolCall);
-            this.registerSearchRef(toolCall.toolCallId);
-          }
+          for (const toolCall of data.toolCalls) this.indexPersistedRecord(toolCall);
         }
         continue;
       }
@@ -224,7 +223,8 @@ export class ToolCallIndexer {
    * the appendEntry path).
    */
   indexPersistedRecord(record: ToolCallRecord): void {
-    this.index.set(record.toolCallId, record);
+    const previous = this.index.get(record.toolCallId);
+    this.index.set(record.toolCallId, mergePersistedRawUpdate(previous, record));
     this.registerSearchRef(record.toolCallId);
   }
 
@@ -254,19 +254,7 @@ export class ToolCallIndexer {
    * neither leak secrets nor fabricate records that are not indexed.
    */
   searchRecords(query: string, options: IndexSearchOptions = {}): IndexSearchResult {
-    const validation = validateSearchQuery(query);
-    // Defensive: an empty or oversized query never scans and never matches all.
-    if (!validation.ok) return { records: [], matchCount: 0 };
-    const needle = validation.query.trim().toLowerCase();
-    const limit = sanitizeSearchLimit(options.limit);
-    const matches: ToolCallRecord[] = [];
-    for (const record of this.index.values()) {
-      if (options.errorsOnly && !record.isError) continue;
-      const haystack = `${record.toolName}\n${JSON.stringify(record.args ?? {})}\n${record.resultText}`.toLowerCase();
-      if (!haystack.includes(needle)) continue;
-      matches.push(record);
-    }
-    return { records: matches.slice(0, limit), matchCount: matches.length };
+    return searchIndexedRecords(this.index, query, options, validateSearchQuery, sanitizeSearchLimit);
   }
 
   /**
@@ -277,7 +265,7 @@ export class ToolCallIndexer {
     const records: ToolCallRecord[] = [];
 
     for (const tc of batch.toolCalls) {
-      const record: ToolCallRecord = {
+      const base: ToolCallRecord = {
         toolCallId: tc.toolCallId,
         toolName: tc.toolName,
         args: tc.args,
@@ -286,8 +274,13 @@ export class ToolCallIndexer {
         turnIndex: batch.turnIndex,
         timestamp: batch.timestamp,
       };
-      this.index.set(record.toolCallId, record);
-      this.registerSearchRef(record.toolCallId);
+      const previous = this.index.get(tc.toolCallId) as (ToolCallRecord & Record<string, any>) | undefined;
+      const record = previous?.__contextPruneRawOnly === true && previous.__contextPruneRawSha256
+        ? { ...base, resultText: "", __contextPruneRawUpdate: true,
+          __contextPruneRawSha256: previous.__contextPruneRawSha256,
+          __contextPruneRawByteLength: previous.__contextPruneRawByteLength } as ToolCallRecord
+        : base;
+      this.indexPersistedRecord(record);
       records.push(record);
     }
 

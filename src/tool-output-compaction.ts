@@ -7,6 +7,14 @@ import { DEFAULT_MAX_BYTES } from "@earendil-works/pi-coding-agent";
 import type { ToolCallIndexer } from "./indexer.js";
 import type { ToolCallRecord } from "./types.js";
 import { CUSTOM_TYPE_INDEX } from "./types.js";
+import {
+  cleanRawDetails,
+  rawStorageLimit,
+  readCompleteRaw,
+  removeVerifiedTempSource,
+  shouldCaptureRaw,
+} from "./raw-integrity.js";
+import type { VerifiedRaw } from "./raw-integrity.js";
 
 const MIN_OUTPUT_CHARS = 1_000;
 const MIN_SAVED_CHARS = 400;
@@ -138,11 +146,89 @@ function currentTurnIndex(ctx: ExtensionContext): number {
   ).length;
 }
 
-function mergeDetails(details: unknown, metadata: Record<string, unknown>): Record<string, unknown> {
+function detailsWithMarker(details: unknown, marker: string, metadata: Record<string, unknown>): Record<string, unknown> {
   const base = details && typeof details === "object" && !Array.isArray(details)
     ? details as Record<string, unknown>
     : {};
-  return { ...base, [COMPACTION_MARKER]: metadata };
+  return { ...base, [marker]: metadata };
+}
+
+function rawFailure(event: ToolResultEvent, reason: string): Record<string, unknown> {
+  const block = event.content.find((item) => item.type === "text");
+  const details = detailsWithMarker(event.details, "contextPruneRawIntegrityFailure", { reason });
+  if (!block || block.type !== "text") return { details };
+  const warning = `[Pruner Raw unavailable: ${reason}; downstream minimization may make this output unrecoverable.]`;
+  return {
+    content: event.content.map((item) => item === block ? { ...block, text: `${block.text}\n\n${warning}` } : item),
+    details,
+  };
+}
+
+function rawOnlyRecord(event: ToolResultEvent, raw: VerifiedRaw, turnIndex: number): ToolCallRecord & {
+  __contextPruneRawOnly: true;
+  __contextPruneRawSha256: string;
+  __contextPruneRawByteLength: number;
+} {
+  return {
+    toolCallId: event.toolCallId,
+    toolName: event.toolName,
+    args: event.input,
+    resultText: raw.text,
+    isError: event.isError,
+    turnIndex,
+    timestamp: Date.now(),
+    __contextPruneRawOnly: true,
+    __contextPruneRawSha256: raw.sha256,
+    __contextPruneRawByteLength: raw.byteLength,
+  };
+}
+
+async function handleToolResult(
+  pi: ExtensionAPI,
+  indexer: ToolCallIndexer,
+  isEnabled: () => boolean,
+  event: ToolResultEvent,
+  ctx: ExtensionContext,
+) {
+  try {
+    if (!isEnabled() || indexer.getRecord(event.toolCallId)) return {};
+    const details = event.details as Record<string, any> | undefined;
+    const coreTruncated = details?.truncation?.truncated === true || typeof details?.fullOutputPath === "string";
+    const outcome = coreTruncated ? null : compactToolOutput(event);
+    if (!shouldCaptureRaw(event, outcome !== null)) return {};
+    const captured = readCompleteRaw(event);
+    if (!captured.ok) return rawFailure(event, captured.reason);
+    const limit = rawStorageLimit(indexer, captured.raw.byteLength);
+    if (limit) return rawFailure(event, limit);
+    const block = event.content.length === 1 && event.content[0]?.type === "text"
+      ? event.content[0]
+      : undefined;
+    if (!block) return rawFailure(event, "unsupported-tool-result-content");
+    const rawRef = indexer.getSearchRef(event.toolCallId);
+    if (!rawRef) return rawFailure(event, "raw-reference-unavailable");
+    const record = rawOnlyRecord(event, captured.raw, currentTurnIndex(ctx));
+    pi.appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: [record] });
+    indexer.indexPersistedRecord(record);
+    const sourceRemoved = removeVerifiedTempSource(captured.raw);
+    const marker = outcome ? COMPACTION_MARKER : "contextPruneRawIntegrity";
+    const baseText = outcome?.text ?? block.text;
+    const visibleText = captured.raw.sourcePath && sourceRemoved
+      ? baseText.split(captured.raw.sourcePath).join("[full output saved in Pruner Raw]")
+      : baseText;
+    const metadata = {
+      rawRef,
+      rawSha256: captured.raw.sha256,
+      rawByteLength: captured.raw.byteLength,
+      sourceFileRemoved: sourceRemoved,
+      ...(outcome ? { kind: outcome.kind, compactedChars: outcome.text.length } : {}),
+    };
+    return {
+      content: [{ ...block, text: `${visibleText}\n\n[Raw output ref: ${rawRef}; SHA-256 ${captured.raw.sha256}; ${captured.raw.byteLength} bytes; retrieve with context_tree_query.]` }],
+      details: detailsWithMarker(cleanRawDetails(event.details, sourceRemoved), marker, metadata),
+    };
+  } catch {
+    return rawFailure(event, "raw-capture-failed");
+  }
 }
 
 export function registerToolOutputCompaction(
@@ -150,39 +236,5 @@ export function registerToolOutputCompaction(
   indexer: ToolCallIndexer,
   isEnabled: () => boolean,
 ): void {
-  pi.on("tool_result", async (event, ctx) => {
-    try {
-      if (!isEnabled() || indexer.getRecord(event.toolCallId)) return {};
-      const outcome = compactToolOutput(event);
-      const block = event.content[0];
-      if (!outcome || block?.type !== "text") return {};
-      const rawText = block.text;
-      const record: ToolCallRecord & { __contextPruneRawOnly: true } = {
-        toolCallId: event.toolCallId,
-        toolName: event.toolName,
-        args: event.input,
-        resultText: rawText,
-        isError: false,
-        turnIndex: currentTurnIndex(ctx),
-        timestamp: Date.now(),
-        __contextPruneRawOnly: true,
-      };
-      pi.appendEntry(CUSTOM_TYPE_INDEX, { toolCalls: [record] });
-      indexer.indexPersistedRecord(record);
-      const rawRef = indexer.getSearchRef(event.toolCallId);
-      if (!rawRef) return {};
-      const metadata = {
-        kind: outcome.kind,
-        rawRef,
-        originalChars: rawText.length,
-        compactedChars: outcome.text.length,
-      };
-      return {
-        content: [{ ...block, text: `${outcome.text}\n\n[Raw output ref: ${rawRef}; retrieve with context_tree_query.]` }],
-        details: mergeDetails(event.details, metadata),
-      };
-    } catch {
-      return {};
-    }
-  });
+  pi.on("tool_result", (event, ctx) => handleToolResult(pi, indexer, isEnabled, event, ctx));
 }
