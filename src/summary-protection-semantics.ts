@@ -204,3 +204,25 @@ export function checkStatusRelations(rawText: string, summaryText: string): Rela
   const unverifiable = Math.max(0, statusCount - covered);
   return { unresolved, unverifiable, contradictions };
 }
+
+/**
+ * Requires each task/next marker to keep its subject nearby: the subject the
+ * marker had in the raw batch must appear shortly before the marker in the
+ * summary. A task without its subject cannot be safely verified.
+ */
+export function checkMarkerSubjects(rawText: string, summaryText: string, items: ProtectedItem[]): ProtectedItem[] {
+  const unresolved: ProtectedItem[] = [];
+  for (const item of items) {
+    const rawIndex = rawText.indexOf(item.value);
+    if (rawIndex < 0) continue;
+    const subject = subjectAt(rawText, rawIndex);
+    // Only structured subjects (paths / owner-repo) are meaningful for tasks;
+    // a bare tool name cannot bind a task to a target.
+    if (subject === "unknown" || !subject.includes("/")) continue;
+    const summaryIndex = summaryText.indexOf(item.value);
+    if (summaryIndex < 0) continue;
+    const windowStart = Math.max(0, summaryIndex - 200);
+    if (!summaryText.slice(windowStart, summaryIndex).includes(subject)) unresolved.push(item);
+  }
+  return unresolved;
+}

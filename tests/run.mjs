@@ -7,6 +7,7 @@ await import("./observability.mjs");
 await import("./observability-overhead.mjs");
 await import("./index-search.mjs");
 await import("./summary-protection.mjs");
+await import("./protection-tasks.mjs");
 await import("./protection-retry.mjs");
 await import("./protection-capacity.mjs");
 console.log(`\nRESULT pass=${state.pass} fail=${state.fail}`);

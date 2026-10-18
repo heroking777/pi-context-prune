@@ -60,27 +60,20 @@ Do not list identifiers that are not needed for the next steps.`;
 // Phase 31 (protected compression): opt-in policy. The target length is a goal,
 // not a hard cap: protected information always wins over the target. Mechanical
 // truncation is explicitly forbidden and never performed.
-export const SYSTEM_PROMPT_PROTECTED_COMPRESSED = `You are compressing a batch of tool calls into a dense summary the assistant will re-read many times.
+export const SYSTEM_PROMPT_PROTECTED_COMPRESSED = `Compress this batch of tool calls for the agent that continues the work.
+Output bullets only. No preamble, no headings, no restating commands or file lists that stay retrievable from the index.
 
-Compression rules:
-- Merge duplicate or repeated success logs into one line; never restate an identical successful command.
-- Group consecutive operations on the SAME target (file, path, module, service) into one entry.
-- Drop meaningless output, progress noise, banners and redundant explanations.
-- Keep the cause-and-effect of state transitions: what changed, what is now true.
-- Keep failure -> fix -> re-verification outcomes together, naming the symptom and the fix.
-- Keep before/after differences for edits.
-- Keep next actions explicit, including anything unresolved or in progress.
+Merge: duplicate or repeated successes into one line; consecutive operations on one subject (repo, file, service) into one entry; failure -> fix -> re-verification into one entry naming the symptom and the fix.
+Drop: noise, progress output, completed intermediate detail, long path/SHA lists.
 
-ALWAYS copy verbatim (never paraphrase, shorten or round):
-- the CURRENT/ACTIVE commit or build id (one identifier; older revisions may be omitted because the raw output stays retrievable)
-- file paths that the next steps must touch (bulk historical paths may be omitted)
-- error identifiers and error strings for UNRESOLVED failures, with a non-zero exit code when present
-- status words such as FAIL / HOLD / UNKNOWN / BLOCKED, always together with WHAT failed or is blocked
-- decisions, unfinished tasks, next actions and rollback/restore instructions
-
-Keep the subject visible next to each identifier and status so it stays verifiable: write \`subject ROLE=value\` (for example \`repo-a HEAD=abc123\`) and \`subject: STATUS\` (for example \`jra-gate: FAIL\`).
-
-Prefer short bullets. Omit completed/duplicate detail and anything not needed to keep working; the raw tool output stays retrievable from the pruner index (use context_index_search, then context_tree_query) when more detail is required.`;
+Keep verbatim, once each, with its subject on the same line:
+- active commit/build/release: "subject ROLE=value"
+- status: "subject: FAIL|HOLD|BLOCKED" plus the reason
+- unresolved error: the error identifier or string and any non-zero exit code
+- decision: "DECISION=..."
+- every unfinished task: "UNFINISHED_TASK: <exact text>" and its "NEXT_ACTION: ..."
+- rollback: "ROLLBACK=..." with the condition
+Never drop a protected line to fit the target length.`;
 
 export type SummarizerPromptMode = "default" | "concise" | "faithful" | "protected";
 

@@ -27,7 +27,7 @@ ok("protected mode on selects the protected prompt and wins over other modes",
   summarizerPromptMode({ ...DEFAULT_CONFIG, protectedSummaryCompression: true, summarizerPromptMode: "concise" }) === "protected");
 const protectedPrompt = summarizerSystemPrompt({ ...DEFAULT_CONFIG, protectedSummaryCompression: true });
 ok("protected prompt states the compression rules and target",
-  protectedPrompt.includes("Merge duplicate") && protectedPrompt.includes("verbatim") &&
+  protectedPrompt.includes("Merge") && protectedPrompt.includes("Keep verbatim") &&
   protectedPrompt.includes(String(PROTECTED_SUMMARY_DEFAULT_TARGET_CHARS)) && protectedPrompt !== SYSTEM_PROMPT);
 ok("custom protected target is used and invalid values fall back",
   summarizerSystemPrompt({ ...DEFAULT_CONFIG, protectedSummaryCompression: true, protectedSummaryTargetChars: 1234 }).includes("1234") &&

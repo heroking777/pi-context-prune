@@ -13,7 +13,7 @@
 // has a machine-readable structure; anything else is reported, never silently
 // passed.
 import { createHash } from "node:crypto";
-import { resolveIdentifiers, checkIdentifierRelations, checkStatusRelations, type IdentifierPair } from "./summary-protection-semantics.js";
+import { resolveIdentifiers, checkIdentifierRelations, checkStatusRelations, checkMarkerSubjects, type IdentifierPair } from "./summary-protection-semantics.js";
 
 export type ProtectedCategory =
   | "active-sha"
@@ -75,8 +75,7 @@ export type ProtectionFailureReason =
   | "in-flight";
 
 const MAX_PER_CATEGORY = 25;
-const MAX_TIER1_SCAN = 4000;
-const MAX_TIER2_SCAN = 4000;
+const MAX_TIER1_SCAN = 4000, MAX_TIER2_SCAN = 4000;
 
 interface Extractor {
   category: ProtectedCategory;
@@ -101,13 +100,13 @@ const TIER1_EXTRACTORS: Extractor[] = [
   { category: "decision", tier: 1, enforce: "all", countsTowardScan: true,
     regex: /\bdecided\s+to\s+([^.;\n]{1,60})/gi, group: 1 },
   { category: "task", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bUNFINISHED_TASK\s*[=:]\s*([^\n]{1,80})/gi, group: 1 },
+    regex: /\bUNFINISHED_TASK\s*[=:]\s*([^;\n]{1,80})/gi, group: 1 },
   { category: "task", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bTODO\s*[=:]\s*([^\n]{1,80})/gi, group: 1 },
+    regex: /\bTODO\s*[=:]\s*([^;\n]{1,80})/gi, group: 1 },
   { category: "next", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bNEXT(?:_ACTION|_TASK|_STEP)?\s*[=:]\s*([^\n]{1,80})/gi, group: 1 },
+    regex: /\bNEXT(?:_ACTION|_TASK|_STEP)?\s*[=:]\s*([^;\n]{1,80})/gi, group: 1 },
   { category: "rollback", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bROLLBACK\s*[=:]\s*([^\n]{1,80})/gi, group: 1 },
+    regex: /\bROLLBACK\s*[=:]\s*([^;\n]{1,80})/gi, group: 1 },
   { category: "status", tier: 1, enforce: "all", countsTowardScan: true, upper: true,
     regex: /\b(FAIL|HOLD|BLOCKED|UNKNOWN)\b/g, group: 1 },
   { category: "error", tier: 1, enforce: "last", countsTowardScan: false, exact: true,
@@ -219,6 +218,8 @@ export interface ProtectionVerdict {
   contradictions: ProtectedRelation[];
   identifierUnresolved: IdentifierPair[];
   identifierContradictions: IdentifierPair[];
+  /** Task/next items whose subject is not preserved next to them. */
+  unboundTasks: ProtectedItem[];
   /** Semantic content that cannot be verified mechanically (never a pass). */
   unverifiableRelations: number;
   ambiguousActive: string[];
@@ -252,11 +253,12 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
   }
   const relations = checkStatusRelations(rawText, summaryText);
   const identifiers = checkIdentifierRelations(rawText, summaryText);
+  const unboundTasks = checkMarkerSubjects(rawText, summaryText, tier1.filter((item) => item.category === "task" || item.category === "next"));
   const unresolvedRelations = [...relations.unresolved, ...relations.contradictions];
   return {
     ok: missing.length === 0 && extraction.overflowCategories.length === 0 && !extraction.truncated &&
       unresolvedRelations.length === 0 && relations.unverifiable === 0 &&
-      identifiers.unresolved.length === 0 && identifiers.contradictions.length === 0,
+      identifiers.unresolved.length === 0 && identifiers.contradictions.length === 0 && unboundTasks.length === 0,
     checked: extraction.items.length,
     required,
     missing,
@@ -271,6 +273,7 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
     contradictions: relations.contradictions,
     identifierUnresolved: identifiers.unresolved,
     identifierContradictions: identifiers.contradictions,
+    unboundTasks,
     unverifiableRelations: relations.unverifiable,
     ambiguousActive: extraction.ambiguousActive,
   };
