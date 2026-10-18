@@ -69,18 +69,21 @@ async function summarizeBatchImpl(
 
   const serialized = serializeBatchForSummarizer(batch);
   const hybrid = config.protectedSummaryHybrid === true;
+  // Phase55: hybrid record extraction also sees the batch cwd (session-level
+  // provenance). Default mode keeps using the untouched serialized text.
+  const recordText = hybrid && typeof batch.cwd === "string" && batch.cwd.length > 0 ? `@batch-cwd ${batch.cwd}\n${serialized}` : serialized;
   const protectedEnabled = config.protectedSummaryCompression === true || hybrid;
   // Phase47: the deterministic core is built before any provider call. When it
   // cannot be verified the batch fails closed with no API usage.
-  const core = hybrid ? buildProtectedCore(serialized) : null;
+  const core = hybrid ? buildProtectedCore(recordText) : null;
   if (core !== null && !core.ok) {
     const reason = core.reason === "core-overflow" ? "overflow" : "missing";
-    return protectionFailureResult(protectionFailureKey(serialized, config), reason);
+    return protectionFailureResult(protectionFailureKey(recordText, config), reason);
   }
   // Phase32/33: a batch whose compressed summary already failed in THIS session
   // is not re-sent on a later automatic flush while its content and policy are
   // unchanged. Other sessions are unaffected.
-  const protectionKey = protectedEnabled ? protectionFailureKey(serialized, config) : null;
+  const protectionKey = protectedEnabled ? protectionFailureKey(recordText, config) : null;
   const session = protectionKey !== null ? resolveProtectionSessionKey(ctx) : null;
   // Phase35: reserve the session slot and same-batch lock BEFORE any provider
   // call; both are released in `finally`, so 429/abort/errors cannot leak them.
@@ -205,7 +208,7 @@ async function summarizeBatchImpl(
     if (hybrid && core !== null && core.ok) {
       // Stage C: deterministic core + LLM notes, validated by the same guard.
       llmText = assembleHybridSummary(core.core, llmText);
-      const hybridVerdict = verifyProtectedSummary(serialized, llmText, { structuredOnly: true });
+      const hybridVerdict = verifyProtectedSummary(recordText, llmText, { structuredOnly: true });
       if (!hybridVerdict.ok) {
         const reason = protectionRejectionReason(hybridVerdict);
         const effective = protectionKey !== null && session?.status === "ok"

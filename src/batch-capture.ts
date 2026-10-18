@@ -9,7 +9,8 @@ export function captureBatch(
   message: any,
   toolResults: any[],
   turnIndex: number,
-  timestamp: number
+  timestamp: number,
+  cwd?: string,
 ): CapturedBatch {
   const content: any[] = Array.isArray(message?.content) ? message.content : [];
 
@@ -47,7 +48,7 @@ export function captureBatch(
       } satisfies CapturedToolCall;
     });
 
-  return { turnIndex, timestamp, assistantText, toolCalls };
+  return { turnIndex, timestamp, assistantText, toolCalls, ...(cwd ? { cwd } : {}) };
 }
 
 /**
@@ -61,7 +62,8 @@ export function captureBatch(
 export function captureUnindexedBatchesFromSession(
   branch: any[],
   indexer: { isSummarized(id: string): boolean },
-  excludeToolNames: string[] = []
+  excludeToolNames: string[] = [],
+  cwd?: string,
 ): CapturedBatch[] {
   // branch is SessionEntry[]. Each message entry has { type: "message", message: AgentMessage }.
   // We must unwrap the SessionEntry wrapper before accessing role/toolCallId.
@@ -125,7 +127,7 @@ export function captureUnindexedBatchesFromSession(
       // without accidentally capturing later unresolved calls from the same
       // assistant message as "(no result)" placeholders.
       const ts = entry.timestamp ? new Date(entry.timestamp).getTime() : (msg.timestamp ?? Date.now());
-      const batch = captureBatch(msg, results, currentTurnIndex, ts);
+      const batch = captureBatch(msg, results, currentTurnIndex, ts, cwd);
       batches.push({
         ...batch,
         toolCalls: batch.toolCalls.filter((tc) => readyIds.has(tc.toolCallId)),

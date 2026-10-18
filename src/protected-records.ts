@@ -5,6 +5,7 @@
 // guard verifies them by exact tuple equality — never by substring proximity.
 // The same `expectedRecords` function is the single authority for both.
 import { extractProtectedItemsDetailed, type ProtectedItem, type ProtectionVerdict } from "./summary-protection.js";
+import { bareHeadRecords } from "./bare-head.js";
 import { extractStatusPairs, resolveIdentifiers, subjectAtIndex } from "./summary-protection-semantics.js";
 
 export interface ProtectedRecord {
@@ -18,6 +19,14 @@ export interface ProtectedRecord {
   r?: string;
   /** True when no meaningful subject could be established (explicit unknown). */
   u?: true;
+  /** Provenance kind when the subject is known but not a repository binding. */
+  p?: "cwd";
+}
+
+/** Session working directory carried in the batch header (Phase55). */
+export function batchCwd(rawText: string): string | undefined {
+  const match = rawText.match(/^@batch-cwd\s+(\S.*)$/m);
+  return match ? match[1].trim() : undefined;
 }
 
 export const ROLE_LABEL: Record<string, string> = {
@@ -62,12 +71,14 @@ function validateRecord(value: unknown): ProtectedRecord | null {
     if (record.c !== "id" || typeof record.r !== "string" || !VALID_ROLES.has(record.r)) return null;
   }
   if (record.u !== undefined && record.u !== true) return null;
+  if (record.p !== undefined && record.p !== "cwd") return null;
   for (const key of Object.keys(record)) {
-    if (!["c", "s", "v", "r", "u"].includes(key)) return null;
+    if (!["c", "s", "v", "r", "u", "p"].includes(key)) return null;
   }
   const base: ProtectedRecord = { c: record.c, s: record.s, v: record.v };
   if (record.r !== undefined) base.r = record.r as string;
   if (record.u === true) base.u = true;
+  if (record.p === "cwd") base.p = "cwd";
   return base;
 }
 
@@ -112,6 +123,7 @@ export function parseRecords(text: string): ProtectedRecord[] {
   return parseRecordsStrict(text).records;
 }
 
+
 export interface ExpectedRecords {
   ok: boolean;
   records: ProtectedRecord[];
@@ -134,16 +146,19 @@ export function expectedRecords(rawText: string): ExpectedRecords {
     seen.add(key);
     records.push(record);
   };
-  const subjectAt = (index: number): { s: string; u?: true } => {
+  const cwd = batchCwd(rawText);
+  const subjectAt = (index: number): { s: string; u?: true; p?: "cwd" } => {
     const subject = subjectAtIndex(rawText, index);
-    // Only a structured subject (path / owner-repo) counts as verified; a tool
-    // name or "unknown" is recorded explicitly as unresolved provenance.
-    return subject.includes("/") ? { s: subject } : { s: "unknown", u: true };
+    // Precedence: explicit repository/path in the tool call > session cwd
+    // (known provenance, not repository ownership) > explicit unknown.
+    if (subject.includes("/")) return { s: subject };
+    if (cwd && cwd.includes("/")) return { s: cwd, p: "cwd" };
+    return { s: "unknown", u: true };
   };
   for (const pair of resolveIdentifiers(rawText).pairs) {
     if (pair.tier !== 1) continue;
     const label = ROLE_LABEL[pair.role];
-    if (label) push({ c: "id", r: label, ...(pair.subject.includes("/") ? { s: pair.subject } : { s: "unknown", u: true as const }), v: pair.value });
+    if (label) push({ c: "id", r: label, ...(pair.subject.includes("/") ? { s: pair.subject } : cwd && cwd.includes("/") ? { s: cwd, p: "cwd" as const } : { s: "unknown", u: true as const }), v: pair.value });
   }
   const pairs = extractStatusPairs(rawText);
   for (const pair of pairs) push({ c: "st", s: pair.subject, v: pair.status });
@@ -170,6 +185,9 @@ export function expectedRecords(rawText: string): ExpectedRecords {
       push({ c: item.category, ...subjectAt(index), v: item.value });
     }
   }
+  const head = bareHeadRecords(rawText, cwd);
+  if (head.ambiguous.length > 0) return { ok: false, records, reason: `ambiguous:${head.ambiguous.join(",")}` };
+  for (const record of head.records) push(record);
   if (records.length > MAX_RECORDS) return { ok: false, records, reason: "record-overflow" };
   return { ok: true, records };
 }
@@ -181,7 +199,7 @@ export interface RecordVerification {
 }
 
 function keyOf(record: ProtectedRecord): string {
-  return JSON.stringify([record.c, record.r ?? null, record.s, record.v, record.u === true]);
+  return JSON.stringify([record.c, record.r ?? null, record.s, record.v, record.u === true, record.p ?? null]);
 }
 
 /**

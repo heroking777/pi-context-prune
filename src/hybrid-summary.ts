@@ -45,6 +45,7 @@ export function buildProtectedCore(rawText: string): ProtectedCore {
       const trimmed = line.trim();
       if (trimmed.length === 0) return false;
       if (MARKER_LINE.test(trimmed)) return false;
+      if (/^@(?:rec|batch-cwd)(?:\s|$|\{)/.test(trimmed)) return false;
       for (const value of values) if (value.length > 0 && trimmed.includes(value)) return false;
       return true;
     })

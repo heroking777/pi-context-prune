@@ -171,3 +171,13 @@ values stay historical, and conflicting authoritative values still fail closed.
 `u:true` so unresolved provenance is distinguishable from a verified binding.
 Hybrid callers verify with `{ structuredOnly: true }` so an empty record set can
 never fall back to the weaker prose checks.
+
+Phase 55: structured provenance and authoritative bare HEAD. `CapturedBatch`
+now carries the session `cwd`, and the hybrid record text is prefixed with
+`@batch-cwd <cwd>` (default mode text is untouched). Subject precedence is
+explicit path in the tool call > session cwd (`p:"cwd"`, known provenance, not
+repository ownership) > `s:"unknown"`, `u:true`. A bare 40/64-hex SHA is
+promoted to an active HEAD only when it is the complete OK result of a
+`git rev-parse`/`symbolic-ref` command; `log/show/diff/rev-list`, error results
+and mixed output are never promoted, and conflicting authoritative values for
+one subject fail closed.

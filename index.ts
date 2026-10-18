@@ -185,7 +185,7 @@ export default function (pi: ExtensionAPI) {
     let batches: CapturedBatch[] = [];
     try {
       const branch = ctx.sessionManager.getBranch();
-      batches = captureUnindexedBatchesFromSession(branch, indexer, [CONTEXT_PRUNE_TOOL_NAME]);
+      batches = captureUnindexedBatchesFromSession(branch, indexer, [CONTEXT_PRUNE_TOOL_NAME], ctx.cwd);
     } catch {
       batches = pendingBatches.slice();
     }

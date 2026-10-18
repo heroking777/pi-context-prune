@@ -297,6 +297,8 @@ export interface CapturedBatch {
    * user → agent-message span when batchingMode === "agent-message".
    */
   userTurnGroup?: number;
+  /** Session working directory captured with the batch (Phase55 provenance). */
+  cwd?: string;
 }
 
 // ── Index record ───────────────────────────────────────────────────────────
