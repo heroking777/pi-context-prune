@@ -71,9 +71,41 @@ ok("a summary missing required items is rejected",
   !verifyProtectedSummary(raw, "Short summary without identifiers.").ok);
 ok("a summary keeping required items passes",
   verifyProtectedSummary(raw, items.map((item) => item.value).join(" | ")).ok && items.length >= 7);
+const rawWithNext = `${raw}\nNEXT_ACTION: ship it`;
 ok("advisory categories never block",
-  verifyProtectedSummary(`${raw}\nNEXT_ACTION: ship it`, items.map((item) => item.value).join(" ")).ok);
+  verifyProtectedSummary(rawWithNext, extractProtectedItems(rawWithNext).map((item) => item.value).join(" ")).ok);
 ok("empty raw content needs no protection", verifyProtectedSummary("", "anything").required === 0);
+
+// Tier separation: current state is enforced; historical detail is retrievable.
+const tieredRaw = [
+  "FINAL_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  `Result (OK): inspected ${PATH}`,
+  "jra-gate: FAIL (envelope mismatch)",
+  "FINAL_SHA=" + SHA,
+  DECISION,
+  TASK,
+  ROLLBACK,
+  Array.from({ length: 40 }, (_, i) => `/hist/run_${i}/artifact_${i}.py`).join("\n"),
+].join("\n");
+const tiered = extractProtectedItems(tieredRaw);
+const tierOf = (category) => tiered.filter((item) => item.category === category).map((item) => item.tier);
+ok("current working state is tier 1", tierOf("active-sha").every((t) => t === 1) && tierOf("decision").every((t) => t === 1) && tierOf("task")[0] === 1 && tierOf("rollback")[0] === 1 && tierOf("status")[0] === 1);
+ok("historical detail is tier 2", tierOf("sha").every((t) => t === 2) && tierOf("path").every((t) => t === 2));
+ok("only the last labelled SHA is the active one",
+  tiered.filter((item) => item.category === "active-sha").length === 1 && tiered.find((item) => item.category === "active-sha").value === SHA);
+const tier1Summary = [SHA, "jra-gate", "FAIL", DECISION, TASK, ROLLBACK].join(" | ");
+const tieredVerdict = verifyProtectedSummary(tieredRaw, tier1Summary);
+ok("omitting tier-2 detail does not block a summary", tieredVerdict.ok && tieredVerdict.tier2Omitted >= 25);
+ok("tier-2 omission is reported, not hidden", tieredVerdict.tier2Count >= 25 && tieredVerdict.tier2Omitted > 0);
+ok("omitting the active SHA is rejected",
+  verifyProtectedSummary(tieredRaw, tier1Summary.replace(SHA, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).ok === false);
+const activeOnlySummary = ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "jra-gate", "FAIL", DECISION, TASK, ROLLBACK].join(" | ");
+ok("an old SHA cannot stand in for the active SHA",
+  verifyProtectedSummary(tieredRaw, activeOnlySummary).missing.some((item) => item.category === "active-sha"));
+ok("a FAIL must keep its subject (semantic relation)",
+  verifyProtectedSummary(tieredRaw, [SHA, "FAIL", DECISION, TASK, ROLLBACK].join(" | ")).ok === false &&
+  verifyProtectedSummary(tieredRaw, tier1Summary).ok === true);
+ok("unstructured prose is not auto-classified", verifyProtectedSummary("the run went badly at some point", "a short note").ok === true);
 
 // ── 4. A/B through the real summarizeBatch with a mode-aware fake provider ──
 function compressionCtx(style) {

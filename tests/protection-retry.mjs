@@ -50,33 +50,38 @@ let aborted = false;
 try { await summarizeBatch(PROTECTED_BATCH, cfgOn, err.ctx, { signal: { aborted: true } }); } catch { aborted = true; }
 ok("abort still throws before any cache write", aborted && protectionFailureCount() === 0 && err.calls.n === 1);
 
-// ── 4. Overflow handling ────────────────────────────────────────────────────
-const shaLine = (n) => `FINAL_SHA=${SHA(n)}`;
-const rawWithN = (n) => Array.from({ length: n }, (_, i) => shaLine(i + 1)).join("\n");
-const summaryWithAll = (n) => Array.from({ length: n }, (_, i) => SHA(i + 1)).join(" ");
+// ── 4. Overflow handling (tier 1 only) ─────────────────────────────────────
+const decisionN = (n) => `DECISION=policy-${n}`;
+const rawWithN = (n) => Array.from({ length: n }, (_, i) => decisionN(i + 1)).join("\n");
+const summaryWithAll = (n) => Array.from({ length: n }, (_, i) => `policy-${i + 1}`).join(" ");
 for (const n of [24, 25]) {
   const detailed = extractProtectedItemsDetailed(rawWithN(n));
-  ok(`${n} protected items do not overflow`, detailed.overflowCategories.length === 0 &&
+  ok(`${n} tier-1 items do not overflow`, detailed.overflowCategories.length === 0 &&
     extractProtectedItems(rawWithN(n)).length === n &&
     verifyProtectedSummary(rawWithN(n), summaryWithAll(n)).ok === true);
 }
 const over = extractProtectedItemsDetailed(rawWithN(26));
-ok("26 protected items report overflow instead of silently passing",
-  over.overflowCategories.includes("sha") && extractProtectedItems(rawWithN(26)).length === 25 &&
+ok("26 tier-1 items report overflow instead of silently passing",
+  over.overflowCategories.includes("decision") && extractProtectedItems(rawWithN(26)).length === 25 &&
   verifyProtectedSummary(rawWithN(26), summaryWithAll(26)).ok === false &&
-  verifyProtectedSummary(rawWithN(26), summaryWithAll(26)).overflow.includes("sha"));
+  verifyProtectedSummary(rawWithN(26), summaryWithAll(26)).overflow.includes("decision"));
 const paths26 = Array.from({ length: 26 }, (_, i) => `/opt/heroking/releases/r${i}/bin/app_${i}.py`).join("\n");
-ok("many distinct paths overflow", verifyProtectedSummary(paths26, paths26).ok === false && verifyProtectedSummary(paths26, paths26).overflow.includes("path"));
-const dup = Array.from({ length: 40 }, () => shaLine(1)).join("\n");
-ok("duplicate protected values never overflow", extractProtectedItemsDetailed(dup).overflowCategories.length === 0 && verifyProtectedSummary(dup, SHA(1)).ok === true);
-const rollbackLast = `${paths26}\nROLLBACK=restore /opt/heroking/releases/jra-da015ff from snapshot`;
-const rollbackVerdict = verifyProtectedSummary(rollbackLast, `${paths26}\nrestore /opt/heroking/releases/jra-da015ff from snapshot`);
-ok("a late ROLLBACK after overflow still cannot pass", rollbackVerdict.ok === false && rollbackVerdict.overflow.includes("path") && rollbackVerdict.missing.length === 0);
+ok("many distinct paths are tier 2 and never overflow",
+  extractProtectedItemsDetailed(paths26).overflowCategories.length === 0 &&
+  verifyProtectedSummary(paths26, "no detail kept").ok === true &&
+  verifyProtectedSummary(paths26, "no detail kept").tier2Omitted >= 25);
+const dup = Array.from({ length: 40 }, () => decisionN(1)).join("\n");
+ok("duplicate tier-1 values never overflow",
+  extractProtectedItemsDetailed(dup).overflowCategories.length === 0 && verifyProtectedSummary(dup, "policy-1").ok === true);
+const rollbackLast = `${rawWithN(26)}\nROLLBACK=restore /opt/heroking/releases/jra-da015ff from snapshot`;
+const rollbackVerdict = verifyProtectedSummary(rollbackLast, `${summaryWithAll(26)}\nrestore /opt/heroking/releases/jra-da015ff from snapshot`);
+ok("a late ROLLBACK after overflow still cannot pass",
+  rollbackVerdict.ok === false && rollbackVerdict.overflow.includes("decision") && rollbackVerdict.missing.length === 0);
 
 // ── 5. Overflow produces a distinguishable failure at the summarize layer ───
 clearProtectionFailures();
 const overflowBatch = batch(Array.from({ length: 26 }, (_, i) => ({
-  toolName: "bash", toolCallId: `o${i}`, args: { command: `step ${i}` }, resultText: `FINAL_SHA=${SHA(i + 1)} status PASS`, isError: false,
+  toolName: "bash", toolCallId: `o${i}`, args: { command: `step ${i}` }, resultText: `DECISION=policy-${i + 1} status PASS`, isError: false,
 })));
 const overflowCtx = fakeCtx("compliant");
 const overflowResult = await summarizeBatch(overflowBatch, cfgOn, overflowCtx.ctx);
@@ -101,18 +106,18 @@ ok("OFF config never creates a suppression path", await (async () => {
 })());
 
 // ── 7. Phase33: scan limit is fail-closed ───────────────────────────────────
-const filler = (n) => Array.from({ length: n }, () => `note ${SHA(1)}`).join("\n");
+const filler = (n) => Array.from({ length: n }, () => "DECISION=D").join("\n");
 const withTail = (n, tail) => `${filler(n)}\n${tail}`;
 for (const n of [3999, 4000]) {
   const detailed = extractProtectedItemsDetailed(filler(n));
-  ok(`${n} matches complete the scan`, detailed.truncated === false && detailed.scanned === n);
-  ok(`${n} matches pass verification`, verifyProtectedSummary(filler(n), SHA(1)).ok === true);
+  ok(`${n} tier-1 matches complete the scan`, detailed.truncated === false && detailed.scanned === n);
+  ok(`${n} tier-1 matches pass verification`, verifyProtectedSummary(filler(n), "D").ok === true);
 }
 for (const n of [4001, 10000]) {
   const detailed = extractProtectedItemsDetailed(filler(n));
-  ok(`${n} matches fail closed on the scan limit`,
-    detailed.truncated === true && verifyProtectedSummary(filler(n), SHA(1)).ok === false &&
-    verifyProtectedSummary(filler(n), SHA(1)).truncated === true);
+  ok(`${n} tier-1 matches fail closed on the scan limit`,
+    detailed.truncated === true && verifyProtectedSummary(filler(n), "D").ok === false &&
+    verifyProtectedSummary(filler(n), "D").truncated === true);
 }
 ok("truncation is distinct from missing and overflow",
   protectionRejectionReason({ truncated: true, overflow: [], missing: [], ok: false, checked: 0, required: 0, advisoryMissing: [] }) === "incomplete" &&
@@ -123,7 +128,7 @@ for (const [label, tail] of [
   ["UNFINISHED_TASK", "UNFINISHED_TASK: resume Phase 18 tracing"],
 ]) {
   const raw = withTail(4001, tail);
-  const verdict = verifyProtectedSummary(raw, `${SHA(1)} ${tail}`);
+  const verdict = verifyProtectedSummary(raw, `D ${tail}`);
   ok(`an unscanned trailing ${label} cannot pass`, verdict.ok === false && verdict.truncated === true);
 }
 clearProtectionFailures();
@@ -132,7 +137,7 @@ const truncCtx = fakeCtx("compliant", "trunc");
 // serialization cap while pushing the total match count past 4000.
 const bigCalls = Array.from({ length: 100 }, (_, i) => ({
   toolName: "bash", toolCallId: `big${i}`, args: {}, isError: false,
-  resultText: Array.from({ length: 43 }, () => `note ${SHA(1)}`).join("\n"),
+  resultText: Array.from({ length: 43 }, () => "DECISION=D").join("\n"),
 }));
 const truncResult = await summarizeBatch(batch(bigCalls), cfgOn, truncCtx.ctx);
 ok("summarize layer reports incomplete for a truncated scan",

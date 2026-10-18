@@ -72,13 +72,13 @@ Compression rules:
 - Keep next actions explicit, including anything unresolved or in progress.
 
 ALWAYS copy verbatim (never paraphrase, shorten or round):
-- commit SHAs, build IDs and revision strings
-- file paths
-- error identifiers, error strings and non-zero exit codes
-- status words such as PASS / FAIL / HOLD / UNKNOWN / BLOCKED
-- decisions, unfinished tasks and rollback/restore instructions
+- the CURRENT/ACTIVE commit or build id (one identifier; older revisions may be omitted because the raw output stays retrievable)
+- file paths that the next steps must touch (bulk historical paths may be omitted)
+- error identifiers and error strings for UNRESOLVED failures, with a non-zero exit code when present
+- status words such as FAIL / HOLD / UNKNOWN / BLOCKED, always together with WHAT failed or is blocked
+- decisions, unfinished tasks, next actions and rollback/restore instructions
 
-Prefer short bullets. Omit anything that is not needed to keep working; the raw tool output stays retrievable from the pruner index when more detail is required.`;
+Prefer short bullets. Omit completed/duplicate detail and anything not needed to keep working; the raw tool output stays retrievable from the pruner index (use context_index_search, then context_tree_query) when more detail is required.`;
 
 export type SummarizerPromptMode = "default" | "concise" | "faithful" | "protected";
 
