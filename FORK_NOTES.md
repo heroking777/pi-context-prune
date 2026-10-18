@@ -134,3 +134,11 @@ provider call); and any notes line containing a protected value, status pair or
 marker is excluded from the LLM input. Subject binding is checked per raw
 occurrence, so repeated identical text under different subjects must keep every
 binding.
+
+Phase 49 hardening: every protected value has an explicit capture limit and a
+terminator check — a value that hits the cap without a legitimate terminator is
+treated as oversized and fails closed before any provider call. Subject
+resolution has a single implementation (`subjectAtIndex`) shared by identifier
+extraction, core construction and guard validation, and marker binding now
+requires the *nearest* subject before an occurrence to match exactly (proximity
+within a window is not sufficient).

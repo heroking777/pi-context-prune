@@ -13,6 +13,7 @@
 // has a machine-readable structure; anything else is reported, never silently
 // passed.
 import { createHash } from "node:crypto";
+import { TIER1_EXTRACTORS, TIER2_EXTRACTORS, MAX_PER_CATEGORY, MAX_TIER1_SCAN, MAX_TIER2_SCAN, type Extractor } from "./summary-protection-extractors.js";
 import { resolveIdentifiers, checkIdentifierRelations, checkStatusRelations, checkMarkerSubjects, type IdentifierPair } from "./summary-protection-semantics.js";
 
 export type ProtectedCategory =
@@ -74,68 +75,19 @@ export type ProtectionFailureReason =
   | "unidentified"
   | "in-flight";
 
-const MAX_PER_CATEGORY = 25;
-const MAX_TIER1_SCAN = 4000, MAX_TIER2_SCAN = 4000;
 
-interface Extractor {
-  category: ProtectedCategory;
-  tier: ProtectedTier;
-  regex: RegExp;
-  group?: number;
-  exact?: boolean;
-  upper?: boolean;
-  /** `last` keeps only the most recent match as the current value. */
-  enforce: "all" | "last";
-  /** High-cardinality "last" extractors do not count toward the scan budget. */
-  countsTowardScan: boolean;
-}
+// Extractor tables and their resource limits live in
+// ./summary-protection-extractors.ts (Phase49) so this module stays bounded.
 
-// Tier 1 — current working state. Active commit/build/release identifiers are
-// resolved separately (see ./summary-protection-semantics.ts) so that
-// BASE_SHA is never treated as the current revision and conflicting values
-// fail closed.
-const TIER1_EXTRACTORS: Extractor[] = [
-  { category: "decision", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bDECISION\s*[=:]\s*([^\s,;]{1,120})/gi, group: 1 },
-  { category: "decision", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bdecided\s+to\s+([^.;\n]{1,60})/gi, group: 1 },
-  { category: "task", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bUNFINISHED_TASK\s*[=:]\s*([^;\n]{1,300})/gi, group: 1 },
-  { category: "task", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bTODO\s*[=:]\s*([^;\n]{1,300})/gi, group: 1 },
-  { category: "next", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bNEXT(?:_ACTION|_TASK|_STEP)?\s*[=:]\s*([^;\n]{1,300})/gi, group: 1 },
-  { category: "rollback", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bROLLBACK\s*[=:]\s*([^;\n]{1,300})/gi, group: 1 },
-  { category: "status", tier: 1, enforce: "all", countsTowardScan: true, upper: true,
-    regex: /\b(FAIL|HOLD|BLOCKED|UNKNOWN)\b/g, group: 1 },
-  { category: "error", tier: 1, enforce: "last", countsTowardScan: false, exact: true,
-    regex: /\b[A-Z][A-Za-z0-9]*(?:Error|Exception|Failure)\b/g },
-  { category: "error", tier: 1, enforce: "last", countsTowardScan: false,
-    regex: /\bERROR\s*[:=]\s*([^\n]{1,300})/g, group: 1 },
-];
 
-// Tier 2 — retrievable detail, never blocking.
-const TIER2_EXTRACTORS: Extractor[] = [
-  { category: "sha", tier: 2, enforce: "all", countsTowardScan: true, exact: true,
-    regex: /\b[0-9a-f]{40}\b|\b[0-9a-f]{64}\b/g },
-  { category: "path", tier: 2, enforce: "all", countsTowardScan: true, exact: true,
-    regex: /\/[\w.@+-]+(?:\/[\w.@+-]+)*\.[A-Za-z0-9]{1,8}\b/g },
-  { category: "status-done", tier: 2, enforce: "all", countsTowardScan: true, upper: true,
-    regex: /\b(PASS|SUCCESS|DEGRADED)\b/g, group: 1 },
-  { category: "diff", tier: 2, enforce: "all", countsTowardScan: true,
-    regex: /\b(?:BEFORE|AFTER|DIFF)\s*[=:]\s*([^\n]{1,80})/gi, group: 1 },
-  { category: "verification", tier: 2, enforce: "all", countsTowardScan: true,
-    regex: /\b(re-?verified|tests?\s+passed|tests?\s+failed)\b/gi, group: 1 },
-];
-
-function collect(rawText: string, extractors: Extractor[], budget: number): { items: ProtectedItem[]; overflow: ProtectedCategory[]; scanned: number; truncated: boolean } {
+function collect(rawText: string, extractors: Extractor[], budget: number): { items: ProtectedItem[]; overflow: ProtectedCategory[]; scanned: number; truncated: boolean; oversized: boolean } {
   const seen = new Set<string>();
   const out: ProtectedItem[] = [];
   const counts = new Map<ProtectedCategory, number>();
   const overflow = new Set<ProtectedCategory>();
   let scanned = 0;
   let truncated = false;
+  let oversized = false;
   outer: for (const extractor of extractors) {
     const regex = new RegExp(extractor.regex.source, extractor.regex.flags);
     const matches = [...rawText.matchAll(regex)];
@@ -147,6 +99,15 @@ function collect(rawText: string, extractors: Extractor[], budget: number): { it
       }
       const raw = extractor.group === undefined ? match[0] : match[extractor.group];
       if (raw === undefined || raw.length === 0) continue;
+      // Phase49: a value that hits its capture cap without a legitimate
+      // terminator is incomplete; fail closed instead of accepting a prefix.
+      if (extractor.maxValue !== undefined && raw.length >= extractor.maxValue) {
+        const nextChar = rawText[(match.index ?? 0) + match[0].length] ?? "";
+        const terminated = extractor.wordBounded === true
+          ? !/[A-Za-z0-9]/.test(nextChar)
+          : nextChar === "" || (extractor.terminators ?? "").includes(nextChar);
+        if (!terminated) oversized = true;
+      }
       const value = extractor.upper ? raw.trim().toUpperCase() : raw.trim();
       const key = `${extractor.category}\u0000${extractor.exact ? value : value.toLowerCase()}`;
       if (seen.has(key)) continue;
@@ -157,7 +118,7 @@ function collect(rawText: string, extractors: Extractor[], budget: number): { it
       out.push({ category: extractor.category, value, exact: extractor.exact === true, tier: extractor.tier });
     }
   }
-  return { items: out, overflow: [...overflow], scanned, truncated };
+  return { items: out, overflow: [...overflow], scanned, truncated, oversized };
 }
 
 export interface ProtectionExtraction {
@@ -166,13 +127,14 @@ export interface ProtectionExtraction {
   scanned: number;
   truncated: boolean;
   tier2Truncated: boolean;
+  oversized: boolean;
   ambiguousActive: string[];
 }
 
-function collectTier1(rawText: string): { items: ProtectedItem[]; overflowCategories: ProtectedCategory[]; scanned: number; truncated: boolean; ambiguousActive: string[] } {
+function collectTier1(rawText: string): { items: ProtectedItem[]; overflowCategories: ProtectedCategory[]; scanned: number; truncated: boolean; oversized: boolean; ambiguousActive: string[] } {
   const scan = collect(rawText, TIER1_EXTRACTORS, MAX_TIER1_SCAN);
   const identifiers = resolveIdentifiers(rawText);
-  return { items: [...identifiers.items, ...scan.items], overflowCategories: scan.overflow, scanned: scan.scanned, truncated: scan.truncated, ambiguousActive: identifiers.ambiguous };
+  return { items: [...identifiers.items, ...scan.items], overflowCategories: scan.overflow, scanned: scan.scanned, truncated: scan.truncated, oversized: scan.oversized || identifiers.oversized, ambiguousActive: identifiers.ambiguous };
 }
 
 /**
@@ -189,6 +151,7 @@ export function extractProtectedItemsDetailed(rawText: string): ProtectionExtrac
     scanned: tier1.scanned + tier2.scanned,
     truncated: tier1.truncated,
     tier2Truncated: tier2.truncated,
+    oversized: tier1.oversized,
     ambiguousActive: tier1.ambiguousActive,
   };
 }
@@ -210,6 +173,8 @@ export interface ProtectionVerdict {
   advisoryMissing: ProtectedItem[];
   overflow: ProtectedCategory[];
   truncated: boolean;
+  /** A protected value hit its capture cap without a legitimate terminator. */
+  oversized: boolean;
   tier1Count: number;
   tier2Count: number;
   tier2Omitted: number;
@@ -253,10 +218,10 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
   }
   const relations = checkStatusRelations(rawText, summaryText);
   const identifiers = checkIdentifierRelations(rawText, summaryText);
-  const unboundTasks = checkMarkerSubjects(rawText, summaryText, tier1.filter((item) => item.category === "task" || item.category === "next"));
+  const unboundTasks = checkMarkerSubjects(rawText, summaryText, tier1.filter((item) => ["task", "next", "rollback", "error", "decision"].includes(item.category)));
   const unresolvedRelations = [...relations.unresolved, ...relations.contradictions];
   return {
-    ok: missing.length === 0 && extraction.overflowCategories.length === 0 && !extraction.truncated &&
+    ok: missing.length === 0 && extraction.overflowCategories.length === 0 && !extraction.truncated && !extraction.oversized &&
       unresolvedRelations.length === 0 && relations.unverifiable === 0 &&
       identifiers.unresolved.length === 0 && identifiers.contradictions.length === 0 && unboundTasks.length === 0,
     checked: extraction.items.length,
@@ -265,6 +230,7 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
     advisoryMissing,
     overflow: extraction.overflowCategories,
     truncated: extraction.truncated,
+    oversized: extraction.oversized,
     tier1Count: tier1.length,
     tier2Count: tier2.length,
     tier2Omitted,
@@ -282,6 +248,7 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
 /** Reason a verdict rejects the summary: incomplete scan and overflow dominate missing items. */
 export function protectionRejectionReason(verdict: ProtectionVerdict): "missing" | "overflow" | "incomplete" {
   if (verdict.truncated) return "incomplete";
+  if (verdict.oversized) return "overflow";
   return verdict.overflow.length > 0 ? "overflow" : "missing";
 }
 

@@ -9,7 +9,7 @@
 // subjects never collapse; protected values are never truncated; a line that
 // cannot be rendered safely fails closed before any provider call.
 import { extractProtectedItemsDetailed, verifyProtectedSummary } from "./summary-protection.js";
-import { extractStatusPairs, resolveIdentifiers } from "./summary-protection-semantics.js";
+import { extractStatusPairs, resolveIdentifiers, subjectAtIndex } from "./summary-protection-semantics.js";
 
 const ROLE_LABEL: Record<string, string> = {
   "final-sha": "FINAL_SHA",
@@ -84,7 +84,7 @@ export function buildProtectedCore(rawText: string): ProtectedCore {
       const index = rawText.indexOf(item.value, from);
       if (index < 0) break;
       from = index + item.value.length;
-      const subject = subjectAtFrom(rawText, index);
+      const subject = subjectAtIndex(rawText, index);
       const key = `m|${item.category}|${subject}|${item.value}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -123,15 +123,6 @@ export function buildProtectedCore(rawText: string): ProtectedCore {
   return { ok: true, core, notesInput, itemCount: lines.length };
 }
 
-function subjectAtFrom(rawText: string, index: number): string {
-  const before = rawText.slice(0, index);
-  const toolIndex = before.lastIndexOf("\nTool:");
-  const line = before.slice(toolIndex + 1).split("\n")[0] ?? "";
-  const path = line.match(/(?:\/[\w.@+-]+)+/);
-  if (path) return path[0];
-  const repo = line.match(/\b[\w.-]+\/[\w.-]+\b/);
-  return repo ? repo[0] : "unknown";
-}
 
 /** Assembles the final summary: deterministic core first, LLM notes second. */
 export function assembleHybridSummary(core: string, llmNotes: string): string {

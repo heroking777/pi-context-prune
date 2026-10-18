@@ -29,11 +29,15 @@ export interface IdentifierPair {
 /** Public alias used by the deterministic core builder. */
 export function subjectForValue(rawText: string, value: string): string {
   const index = rawText.indexOf(value);
-  return index < 0 ? "unknown" : subjectAt(rawText, index);
+  return index < 0 ? "unknown" : subjectAtIndex(rawText, index);
 }
 
-/** Nearest preceding tool-call subject (path, owner/repo or tool name). */
-function subjectAt(rawText: string, index: number): string {
+/**
+ * The single authoritative subject resolver: nearest preceding tool-call
+ * subject (path, owner/repo or tool name). Every caller — identifier
+ * extraction, core construction and guard validation — uses this.
+ */
+export function subjectAtIndex(rawText: string, index: number): string {
   const before = rawText.slice(0, index);
   const toolIndex = before.lastIndexOf("\nTool:");
   const line = before.slice(toolIndex + 1).split("\n")[0] ?? "";
@@ -45,11 +49,17 @@ function subjectAt(rawText: string, index: number): string {
   return tool ? tool[1] : "unknown";
 }
 
+function subjectAt(rawText: string, index: number): string {
+  return subjectAtIndex(rawText, index);
+}
+
 export interface IdentifierResolution {
   items: ProtectedItem[];
   pairs: IdentifierPair[];
   /** Roles whose same-role/same-subject values disagree (fail closed). */
   ambiguous: string[];
+  /** A labelled value hit its capture cap without a legitimate terminator. */
+  oversized: boolean;
 }
 
 /**
@@ -59,11 +69,15 @@ export interface IdentifierResolution {
  */
 export function resolveIdentifiers(rawText: string): IdentifierResolution {
   const pairs: IdentifierPair[] = [];
+  let oversized = false;
+  const MAX_IDENTIFIER_CHARS = 200;
   for (const spec of IDENTIFIER_ROLES) {
-    const regex = new RegExp(`\\b${spec.label}\\s*[=:]\\s*([A-Za-z0-9._/-]{2,})`, "gi");
+    const regex = new RegExp(`\\b${spec.label}\\s*[=:]\\s*([A-Za-z0-9._/-]{2,${MAX_IDENTIFIER_CHARS}})`, "gi");
     for (const match of rawText.matchAll(regex)) {
       const value = match[1];
       if (typeof value !== "string") continue;
+      const nextChar = rawText[(match.index ?? 0) + match[0].length] ?? "";
+      if (value.length >= MAX_IDENTIFIER_CHARS && /[A-Za-z0-9._/-]/.test(nextChar)) oversized = true;
       pairs.push({ role: spec.role, value, subject: subjectAt(rawText, match.index ?? 0), category: spec.category, tier: spec.tier });
     }
   }
@@ -83,7 +97,7 @@ export function resolveIdentifiers(rawText: string): IdentifierResolution {
     seen.add(key);
     items.push({ category: pair.category, value: pair.value, exact: true, tier: pair.tier });
   }
-  return { items, pairs, ambiguous: [...ambiguous] };
+  return { items, pairs, ambiguous: [...ambiguous], oversized };
 }
 
 export interface IdentifierCheck {
@@ -111,7 +125,11 @@ function nearestSubject(summaryText: string, index: number, subjects: string[]):
   let best: { subject: string; position: number } | undefined;
   for (const subject of subjects) {
     const position = summaryText.lastIndexOf(subject, index);
-    if (position >= 0 && (!best || position > best.position)) best = { subject, position };
+    // Prefer the longest subject on a tie: a shorter prefix such as /srv/repo
+    // starts at the same offset as /srv/repo/file and must not win.
+    if (position >= 0 && (!best || position > best.position || (position === best.position && subject.length > best.subject.length))) {
+      best = { subject, position };
+    }
   }
   return best?.subject;
 }
@@ -217,6 +235,12 @@ export function checkStatusRelations(rawText: string, summaryText: string): Rela
  * summary. A task without its subject cannot be safely verified.
  */
 export function checkMarkerSubjects(rawText: string, summaryText: string, items: ProtectedItem[]): ProtectedItem[] {
+  const universe = new Set<string>();
+  for (const match of rawText.matchAll(/(?:\/[\w.@+-]+)+/g)) {
+    universe.add(match[0]);
+    if (universe.size >= 200) break;
+  }
+  const subjects = [...universe];
   const unresolved: ProtectedItem[] = [];
   const seen = new Set<string>();
   for (const item of items) {
@@ -225,21 +249,22 @@ export function checkMarkerSubjects(rawText: string, summaryText: string, items:
       const rawIndex = rawText.indexOf(item.value, from);
       if (rawIndex < 0) break;
       from = rawIndex + item.value.length;
-      const subject = subjectAt(rawText, rawIndex);
-      // Only structured subjects (paths / owner-repo) are meaningful for tasks;
-      // a bare tool name cannot bind a task to a target.
-      if (subject === "unknown" || !subject.includes("/")) continue;
+      const expected = subjectAtIndex(rawText, rawIndex);
+      // Only structured subjects (paths / owner-repo) are meaningful; a bare
+      // tool name cannot bind a marker to a target.
+      if (expected === "unknown" || !expected.includes("/")) continue;
       let bound = false;
       let cursor = 0;
       for (;;) {
         const summaryIndex = summaryText.indexOf(item.value, cursor);
         if (summaryIndex < 0) break;
         cursor = summaryIndex + item.value.length;
-        const windowStart = Math.max(0, summaryIndex - 200);
-        if (summaryText.slice(windowStart, summaryIndex).includes(subject)) { bound = true; break; }
+        // Exact structured binding: the nearest subject before this occurrence
+        // must be the expected one, not merely somewhere in a 200-char window.
+        if (nearestSubject(summaryText, summaryIndex, subjects) === expected) { bound = true; break; }
       }
       if (!bound) {
-        const key = `${item.category}|${subject}|${item.value}`;
+        const key = `${item.category}|${expected}|${item.value}`;
         if (!seen.has(key)) { seen.add(key); unresolved.push(item); }
       }
     }
