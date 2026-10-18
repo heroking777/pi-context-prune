@@ -9,8 +9,11 @@ Current values on the reference host (update them when they change):
 | Item | Value |
 |---|---|
 | Production extension dir | `/home/deploy/.pi/agent/local-packages/pi-context-prune/` |
-| Production bundle | `dist/index.js` — SHA-256 `58810bf8a135ba6a8975e6848940c5982872b0a63c7910d2a3481fb9b90ad45c` (218,660 B, upstream v1.4.0 + OPT-001/025) |
-| Upstream v1.4.0 baseline bundle | SHA-256 `5ee648f6c314ff317e2800230cf4044fe4be1f82651191a57226f76f11fc9b1b` (202,756 B) |
+| Production bundle (measured T02f, 2026-10-19 05:15 JST) | `dist/index.js` — SHA-256 `1b1527c66b07b9b54646115a2db50273a810813b3739c01778df00d6b15988c8` (307,119 B, mode `0400`, owner `deploy:deploy`) |
+| Verified T02f rollback copy | `dist/index.js.rollback-t02f-20261018T201505Z` — SHA-256 `1b1527c66b07b9b54646115a2db50273a810813b3739c01778df00d6b15988c8` (307,119 B; `cmp`-verified against production; mode/owner preserved) |
+| Historical production value (superseded; retained for audit) | SHA-256 `58810bf8a135ba6a8975e6848940c5982872b0a63c7910d2a3481fb9b90ad45c` (218,660 B; introduced in source commit `2694206477ed1e0dc00a1487dee1b378a996da2c`; not a verified rollback artifact) |
+| T02c candidate build (not deployed) | SHA-256 `db646f491127000262a44285fa0fc1041a11c90093a0eeac405d6a48a2d753e0` (307,933 B) |
+| Upstream v1.4.0 baseline bundle | SHA-256 `5ee648f6c314ff317e2800230cf4044fe4be1f82651191a57226f76f11fc9b1b` (202,756 B; lacks OPT-001/025; not an equivalent automatic fallback) |
 | Staging extension dir | `/home/deploy/.pi-work/pruner-phase7/staging/ext/pi-context-prune/` |
 | Clean-clone staging bundle | `022bf10438ea2d47058cd6d47f8d8a9b96faf42e6eb815348736d4f426c2ddcb` (223,666 B; recorded lockfile/build environment) |
 | Settings | `/home/deploy/.pi/agent/context-prune/settings.json` |
@@ -48,7 +51,9 @@ build environments is *not* expected — verify semantics instead (§3).
 ```bash
 STAGE=/path/to/isolated/staging/pi-context-prune
 mkdir -p "$STAGE/dist"
-cp -r dist/index.js dist/index.js.map package.json README.md FORK_NOTES.md "$STAGE/"
+cp -a dist/index.js "$STAGE/dist/index.js"
+cp -a dist/index.js.map "$STAGE/dist/index.js.map"
+cp -a package.json README.md FORK_NOTES.md "$STAGE/"
 sha256sum "$STAGE/dist/index.js"       # must equal the SHA recorded in step 1
 ```
 
@@ -58,6 +63,8 @@ Rules:
 * The extension directory must **not** contain `node_modules` — `@earendil-works/*` is
   resolved from the Pi process itself. For a standalone harness, symlink the packaged
   runtime instead (see §3).
+* The production directory had no `dist/index.js.map` during T02f. If a later candidate adds
+  a map, record its prior absence and candidate hash; rollback must account for that file too.
 * Do **not** modify `settings.json` at this point: every option added by this fork defaults
   to the previous behaviour, so no migration is needed.
 * Do **not** restart or stop the running Pi process. Staging is inert until a new Pi
@@ -86,7 +93,8 @@ timeout 25 env HOME=$S/home \
   PI_CODING_AGENT_DIR=$S/home/.pi/agent \
   PI_CODING_AGENT_SESSION_DIR=$S/home/.pi/agent/sessions \
   PI_OFFLINE=1 \
-  pi -e "$S/ext/pi-context-prune/dist/index.js" --no-session --no-tools --mode rpc \
+  node /home/deploy/.npm-global/lib/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js \
+  -e "$S/ext/pi-context-prune/dist/index.js" --no-session --no-tools --mode rpc \
   < /dev/null
 ```
 
@@ -95,51 +103,75 @@ Expected on stdout: a `setStatus` request with `statusKey":"context-prune"` and
 empty stderr. A deliberately broken extension must make the same command exit `1` with
 `Failed to load extension …` — use that as the negative control whenever you change this
 procedure. Confirm afterwards that the production settings file's mtime and session
-directory contents are unchanged.
+directory contents are unchanged. Do **not** use `/home/deploy/bin/pi` for this isolated
+read-only check: that wrapper runs `apply_pi_runtime_patch.mjs --ensure-applied` (which
+rewrites the global runtime-generation marker) and can source configured auth files. Use
+the direct CLI path above with the isolated `HOME` and `PI_CODING_AGENT_DIR`.
 
 ## 4. Promote (separate, explicit step)
 
 Promotion is a **new Pi session** action, not something to do in a running one:
 
-1. Keep a copy of the outgoing bundle next to the new one (`dist/index.js.prev`) **and its
-   recorded SHA**.
-2. Stop the Pi session that uses the extension.
-3. Replace `dist/index.js` (and `dist/index.js.map`) with the verified staging copy.
-4. Verify `sha256sum dist/index.js` equals the SHA recorded in step 1.
-5. Start a new Pi session and confirm the `setStatus`/`pruner loaded` output.
-6. Leave the new options at their defaults for the first session.
+1. Keep the verified T02f rollback copy (`dist/index.js.rollback-t02f-20261018T201505Z`, SHA `1b1527c66b07b9b54646115a2db50273a810813b3739c01778df00d6b15988c8`) unchanged. Before any later promotion, create another unique outgoing-bundle copy; never overwrite a recorded backup. Verify SHA, `cmp`, owner/mode, size, and same filesystem before promotion.
+2. Confirm the live bundle still matches the approved predeployment SHA and the staged candidate matches its independently recorded SHA. Any mismatch stops promotion.
+3. Stop the Pi session only under separate explicit authorization.
+4. Replace the bundle only from the verified stage; use a same-filesystem temporary file and atomic rename. The current production had no source map; handle a candidate map only after recording its hash and prior state.
+5. Verify the installed SHA/bytes and file metadata against the approved candidate.
+6. Start a new Pi session only under separate explicit authorization and confirm the `setStatus`/`pruner loaded` output.
+7. Leave new options at defaults for the first session.
 
-## 5. Restore / rollback
+## 5. Restore / rollback (requires explicit authorization; not executed by T02f)
 
-Nothing in this fork changed a default, the settings file, or the session entry format, so
-rollback is a pure file swap:
-
-```bash
-cd /home/deploy/.pi/agent/local-packages/pi-context-prune
-sha256sum dist/index.js                     # record what you are removing
-cp dist/index.js dist/index.js.rollback-$(date +%F)
-cp dist/index.js.prev dist/index.js         # previous bundle, saved in step 4.1
-sha256sum dist/index.js                     # must equal the SHA saved in step 4.1
-```
-
-If no saved copy exists, restore the known-good deployed bundle instead:
+T02f verified this rollback copy against the current production bundle:
+`dist/index.js.rollback-t02f-20261018T201505Z` (SHA-256
+`1b1527c66b07b9b54646115a2db50273a810813b3739c01778df00d6b15988c8`, 307,119 B,
+mode `0400`, owner `deploy:deploy`). Before any restore, confirm the approved current
+candidate hash, stop the Pi session only under separate authorization, and run the following
+only after checking every precondition:
 
 ```bash
-# upstream v1.4.0 + OPT-001/025, as deployed
-sha256sum dist/index.js   # expect 58810bf8a135ba6a8975e6848940c5982872b0a63c7910d2a3481fb9b90ad45c
+set -euo pipefail
+D=/home/deploy/.pi/agent/local-packages/pi-context-prune/dist
+BACKUP="$D/index.js.rollback-t02f-20261018T201505Z"
+EXPECTED_BACKUP_SHA=1b1527c66b07b9b54646115a2db50273a810813b3739c01778df00d6b15988c8
+EXPECTED_CURRENT_SHA='<fill with the explicitly approved live candidate SHA>'
+
+# Hard preconditions: no symlinks; exact backup and explicitly approved live bundle.
+test -f "$BACKUP" && test ! -L "$BACKUP"
+test "$(sha256sum "$BACKUP" | awk '{print $1}')" = "$EXPECTED_BACKUP_SHA"
+test "$(stat -c '%s|%a|%U:%G' "$BACKUP")" = '307119|400|deploy:deploy'
+test -f "$D/index.js" && test ! -L "$D/index.js"
+test "$(sha256sum "$D/index.js" | awk '{print $1}')" = "$EXPECTED_CURRENT_SHA"
+
+# Preserve the outgoing live bundle as another unique copy before restoring.
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+OUT="$D/index.js.rollback-outgoing-$STAMP"
+test ! -e "$OUT"
+OUT_TMP=$(mktemp "$D/.index.js.outgoing.XXXXXX")
+cp --archive --reflink=never -- "$D/index.js" "$OUT_TMP"
+test "$(sha256sum "$OUT_TMP" | awk '{print $1}')" = "$EXPECTED_CURRENT_SHA"
+cmp -s "$D/index.js" "$OUT_TMP"
+mv -nT -- "$OUT_TMP" "$OUT"
+test ! -e "$OUT_TMP"
+test "$(sha256sum "$OUT" | awk '{print $1}')" = "$EXPECTED_CURRENT_SHA"
+cmp -s "$D/index.js" "$OUT"
+
+# Restore through a same-filesystem temporary file, verify, then atomic rename.
+RESTORE_TMP=$(mktemp "$D/.index.js.restore.XXXXXX")
+cp --archive --reflink=never -- "$BACKUP" "$RESTORE_TMP"
+test "$(sha256sum "$RESTORE_TMP" | awk '{print $1}')" = "$EXPECTED_BACKUP_SHA"
+test "$(stat -c '%s|%a|%U:%G' "$RESTORE_TMP")" = '307119|400|deploy:deploy'
+cmp -s "$BACKUP" "$RESTORE_TMP"
+mv -fT -- "$RESTORE_TMP" "$D/index.js"
+test "$(sha256sum "$D/index.js" | awk '{print $1}')" = "$EXPECTED_BACKUP_SHA"
+test "$(stat -c '%s|%a|%U:%G' "$D/index.js")" = '307119|400|deploy:deploy'
+cmp -s "$BACKUP" "$D/index.js"
 ```
 
-If that file is unavailable, rebuild the pristine upstream v1.4.0 bundle from the fork
-(which contains the v1.4.0 tag) and re-apply nothing — but note that the pristine build
-(`5ee648f6c314ff317e2800230cf4044fe4be1f82651191a57226f76f11fc9b1b`) does **not** contain
-OPT-001/025, so the in-house behaviour would be lost:
-
-```bash
-git clone git@github.com:heroking777/pi-context-prune.git /tmp/prune-v140
-cd /tmp/prune-v140 && git checkout v1.4.0 && npm install && npm run build
-sha256sum dist/index.js   # expect 5ee648f6c314ff317e2800230cf4044fe4be1f82651191a57226f76f11fc9b1b
-```
-
-Rollback requires a Pi restart to take effect (the extension is loaded at startup).
-Sessions written while the new bundle was active remain readable by the restored bundle:
-the entry types, refs footer and restore path are unchanged.
+**Stop without changing or restarting anything** if the live hash differs from the explicitly
+approved expected value; the backup is missing, a symlink, has wrong SHA/bytes/metadata; a
+path/device/owner/mode/permission check fails; an outgoing-copy destination already exists;
+or any command errors. Do not use historical SHA `58810bf8…` or pristine upstream SHA
+`5ee648f6…` as automatic fallbacks: neither is the verified T02f backup, and the pristine
+bundle lacks OPT-001/025. Any source-map state change requires its own verified rollback
+plan. After file verification, a new Pi session/restart remains a separate authorized step.
