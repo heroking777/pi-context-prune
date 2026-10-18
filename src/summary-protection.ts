@@ -96,23 +96,23 @@ interface Extractor {
 // fail closed.
 const TIER1_EXTRACTORS: Extractor[] = [
   { category: "decision", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bDECISION\s*[=:]\s*([^\s,;]{1,80})/gi, group: 1 },
+    regex: /\bDECISION\s*[=:]\s*([^\s,;]{1,120})/gi, group: 1 },
   { category: "decision", tier: 1, enforce: "all", countsTowardScan: true,
     regex: /\bdecided\s+to\s+([^.;\n]{1,60})/gi, group: 1 },
   { category: "task", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bUNFINISHED_TASK\s*[=:]\s*([^;\n]{1,80})/gi, group: 1 },
+    regex: /\bUNFINISHED_TASK\s*[=:]\s*([^;\n]{1,300})/gi, group: 1 },
   { category: "task", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bTODO\s*[=:]\s*([^;\n]{1,80})/gi, group: 1 },
+    regex: /\bTODO\s*[=:]\s*([^;\n]{1,300})/gi, group: 1 },
   { category: "next", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bNEXT(?:_ACTION|_TASK|_STEP)?\s*[=:]\s*([^;\n]{1,80})/gi, group: 1 },
+    regex: /\bNEXT(?:_ACTION|_TASK|_STEP)?\s*[=:]\s*([^;\n]{1,300})/gi, group: 1 },
   { category: "rollback", tier: 1, enforce: "all", countsTowardScan: true,
-    regex: /\bROLLBACK\s*[=:]\s*([^;\n]{1,80})/gi, group: 1 },
+    regex: /\bROLLBACK\s*[=:]\s*([^;\n]{1,300})/gi, group: 1 },
   { category: "status", tier: 1, enforce: "all", countsTowardScan: true, upper: true,
     regex: /\b(FAIL|HOLD|BLOCKED|UNKNOWN)\b/g, group: 1 },
   { category: "error", tier: 1, enforce: "last", countsTowardScan: false, exact: true,
     regex: /\b[A-Z][A-Za-z0-9]*(?:Error|Exception|Failure)\b/g },
   { category: "error", tier: 1, enforce: "last", countsTowardScan: false,
-    regex: /\bERROR\s*[:=]\s*([^\n]{1,80})/g, group: 1 },
+    regex: /\bERROR\s*[:=]\s*([^\n]{1,300})/g, group: 1 },
 ];
 
 // Tier 2 — retrievable detail, never blocking.

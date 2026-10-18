@@ -218,17 +218,31 @@ export function checkStatusRelations(rawText: string, summaryText: string): Rela
  */
 export function checkMarkerSubjects(rawText: string, summaryText: string, items: ProtectedItem[]): ProtectedItem[] {
   const unresolved: ProtectedItem[] = [];
+  const seen = new Set<string>();
   for (const item of items) {
-    const rawIndex = rawText.indexOf(item.value);
-    if (rawIndex < 0) continue;
-    const subject = subjectAt(rawText, rawIndex);
-    // Only structured subjects (paths / owner-repo) are meaningful for tasks;
-    // a bare tool name cannot bind a task to a target.
-    if (subject === "unknown" || !subject.includes("/")) continue;
-    const summaryIndex = summaryText.indexOf(item.value);
-    if (summaryIndex < 0) continue;
-    const windowStart = Math.max(0, summaryIndex - 200);
-    if (!summaryText.slice(windowStart, summaryIndex).includes(subject)) unresolved.push(item);
+    let from = 0;
+    for (;;) {
+      const rawIndex = rawText.indexOf(item.value, from);
+      if (rawIndex < 0) break;
+      from = rawIndex + item.value.length;
+      const subject = subjectAt(rawText, rawIndex);
+      // Only structured subjects (paths / owner-repo) are meaningful for tasks;
+      // a bare tool name cannot bind a task to a target.
+      if (subject === "unknown" || !subject.includes("/")) continue;
+      let bound = false;
+      let cursor = 0;
+      for (;;) {
+        const summaryIndex = summaryText.indexOf(item.value, cursor);
+        if (summaryIndex < 0) break;
+        cursor = summaryIndex + item.value.length;
+        const windowStart = Math.max(0, summaryIndex - 200);
+        if (summaryText.slice(windowStart, summaryIndex).includes(subject)) { bound = true; break; }
+      }
+      if (!bound) {
+        const key = `${item.category}|${subject}|${item.value}`;
+        if (!seen.has(key)) { seen.add(key); unresolved.push(item); }
+      }
+    }
   }
   return unresolved;
 }

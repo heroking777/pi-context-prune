@@ -126,3 +126,11 @@ summaries with a three-stage pipeline:
 
 The mode never makes the model the authority for Tier-1 values, and default
 behaviour (all options at their defaults) is unchanged.
+
+Integrity rules (Phase 48): deduplication is per (role/category, subject, value)
+so two subjects with the same value never collapse; protected values are never
+truncated (a line that cannot be rendered safely fails closed before any
+provider call); and any notes line containing a protected value, status pair or
+marker is excluded from the LLM input. Subject binding is checked per raw
+occurrence, so repeated identical text under different subjects must keep every
+binding.
