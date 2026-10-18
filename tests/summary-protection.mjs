@@ -63,17 +63,17 @@ const raw = [
 const items = extractProtectedItems(raw);
 const categories = new Set(items.map((item) => item.category));
 ok("extraction finds every required category",
-  ["active-sha", "sha", "path", "error", "status", "decision", "task", "rollback"].every((category) => categories.has(category)));
+  ["final-sha", "sha", "path", "error", "status", "decision", "task", "rollback"].every((category) => categories.has(category)));
 ok("extraction is bounded and de-duplicated",
   extractProtectedItems(`${SHA}\n${SHA}`).filter((item) => item.category === "sha" && item.value === SHA).length === 1 &&
   extractProtectedItems(Array.from({ length: 100 }, (_, i) => `/${i}/x_${i}.py`).join("\n")).filter((item) => item.category === "path").length <= 25);
-const passingSummary = `${items.map((item) => item.value).join(" | ")} | jra-gate: FAIL`;
+const passingSummary = `${items.map((item) => item.value).join(" | ")} | jra-gate: FAIL | FINAL_SHA=${SHA}`;
 ok("a summary keeping required items passes",
   verifyProtectedSummary(raw, passingSummary).ok && items.length >= 7);
 const rawWithNext = `${raw}\nNEXT_ACTION: ship it`;
 const nextItems = extractProtectedItems(rawWithNext);
 ok("advisory categories never block",
-  verifyProtectedSummary(rawWithNext, `${nextItems.map((item) => item.value).join(" ")} jra-gate: FAIL`).ok);
+  verifyProtectedSummary(rawWithNext, `${nextItems.map((item) => item.value).join(" ")} jra-gate: FAIL FINAL_SHA=${SHA}`).ok);
 ok("empty raw content needs no protection", verifyProtectedSummary("", "anything").required === 0);
 
 // Tier separation: current state is enforced; historical detail is retrievable.
@@ -88,34 +88,42 @@ const tiered = extractProtectedItems(tieredRaw);
 const tierOf = (category) => tiered.filter((item) => item.category === category).map((item) => item.tier);
 ok("current working state is tier 1", tierOf("active-sha").every((t) => t === 1) && tierOf("decision").every((t) => t === 1) && tierOf("task")[0] === 1 && tierOf("rollback")[0] === 1 && tierOf("status")[0] === 1);
 ok("historical detail is tier 2", tierOf("sha").every((t) => t === 2) && tierOf("path").every((t) => t === 2));
-const tier1Summary = [SHA, "jra-gate: FAIL", DECISION, TASK, ROLLBACK].join(" | ");
+const tier1Summary = [`FINAL_SHA=${SHA}`, "jra-gate: FAIL", DECISION, TASK, ROLLBACK].join(" | ");
 const tieredVerdict = verifyProtectedSummary(tieredRaw, tier1Summary);
 ok("omitting tier-2 detail does not block a summary", tieredVerdict.ok && tieredVerdict.tier2Omitted >= 25);
 ok("tier-2 omission is reported, not hidden", tieredVerdict.tier2Count >= 25 && tieredVerdict.tier2Omitted > 0);
 ok("omitting the active SHA is rejected",
-  verifyProtectedSummary(tieredRaw, tier1Summary.replace(SHA, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")).ok === false);
+  verifyProtectedSummary(tieredRaw, [`FINAL_SHA=${"b".repeat(40)}`, "jra-gate: FAIL", DECISION, TASK, ROLLBACK].join(" | ")).ok === false);
 ok("an old SHA cannot stand in for the active SHA",
-  verifyProtectedSummary(tieredRaw, ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "jra-gate: FAIL", DECISION, TASK, ROLLBACK].join(" | "))
-    .missing.some((item) => item.category === "active-sha"));
+  verifyProtectedSummary(tieredRaw, [`FINAL_SHA=${"b".repeat(40)}`, "jra-gate: FAIL", DECISION, TASK, ROLLBACK].join(" | "))
+    .missing.some((item) => item.category === "final-sha"));
 ok("a FAIL must keep its subject (semantic relation)",
-  verifyProtectedSummary(tieredRaw, [SHA, "FAIL", DECISION, TASK, ROLLBACK].join(" | ")).ok === false &&
+  verifyProtectedSummary(tieredRaw, [`FINAL_SHA=${SHA}`, "FAIL", DECISION, TASK, ROLLBACK].join(" | ")).ok === false &&
   verifyProtectedSummary(tieredRaw, tier1Summary).ok === true);
 ok("unstructured prose is not auto-classified", verifyProtectedSummary("the run went badly at some point", "a short note").ok === true);
 
-// Phase37 — active-identifier resolution.
-ok("a single labelled SHA resolves as the active identifier",
-  extractProtectedItems(`FINAL_SHA=${SHA}`).some((item) => item.category === "active-sha" && item.value === SHA));
-ok("BASE_SHA is never treated as the active revision",
-  !extractProtectedItems("BASE_SHA=" + SHA).some((item) => item.category === "active-sha") &&
+// Phase37/38 — identifier roles are distinct.
+ok("a single labelled SHA resolves per role",
+  extractProtectedItems(`FINAL_SHA=${SHA}`).some((item) => item.category === "final-sha" && item.value === SHA));
+ok("BASE_SHA is a comparison origin, never a current value",
+  !extractProtectedItems("BASE_SHA=" + SHA).some((item) => item.tier === 1) &&
   verifyProtectedSummary("BASE_SHA=" + SHA, "no identifiers").ok === true);
-const conflicting = `FINAL_SHA=${SHA}\nHEAD=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb`;
-ok("conflicting commit-like identifiers fail closed",
-  verifyProtectedSummary(conflicting, `FINAL_SHA=${SHA}`).ok === false &&
-  verifyProtectedSummary(conflicting, `FINAL_SHA=${SHA}`).ambiguousActive.includes("active-sha"));
-ok("build and release identifiers are kept separate and both required",
+const A = "a".repeat(40), B = "b".repeat(40);
+ok("GitHub HEAD and VPS DEPLOYED_SHA may differ and are both required",
+  verifyProtectedSummary(`HEAD=${A}\nDEPLOYED_SHA=${B}`, `HEAD=${A} DEPLOYED_SHA=${B}`).ok === true &&
+  verifyProtectedSummary(`HEAD=${A}\nDEPLOYED_SHA=${B}`, `HEAD=${A}`).ok === false);
+ok("BASE_SHA and FINAL_SHA may differ without conflict",
+  verifyProtectedSummary(`BASE_SHA=${A}\nFINAL_SHA=${B}`, `FINAL_SHA=${B}`).ok === true);
+ok("same role with contradictory values fails closed",
+  verifyProtectedSummary(`FINAL_SHA=${A}\nFINAL_SHA=${B}`, `FINAL_SHA=${A}`).ok === false &&
+  verifyProtectedSummary(`FINAL_SHA=${A}\nFINAL_SHA=${B}`, `FINAL_SHA=${A}`).ambiguousActive.includes("final-sha"));
+ok("build and release are separate roles and both required",
   extractProtectedItems("BUILD_ID=build-1234\nRELEASE=rel-9").filter((item) => item.tier === 1 && (item.category === "build-id" || item.category === "release")).length === 2 &&
-  verifyProtectedSummary("BUILD_ID=build-1234\nRELEASE=rel-9", "build-1234").ok === false &&
-  verifyProtectedSummary("BUILD_ID=build-1234\nRELEASE=rel-9", "build-1234 rel-9").ok === true);
+  verifyProtectedSummary("BUILD_ID=build-1234\nRELEASE=rel-9", "BUILD_ID=build-1234").ok === false &&
+  verifyProtectedSummary("BUILD_ID=build-1234\nRELEASE=rel-9", "BUILD_ID=build-1234 RELEASE=rel-9").ok === true);
+ok("swapping the GitHub and VPS identifiers is rejected",
+  verifyProtectedSummary(`HEAD=${A}\nDEPLOYED_SHA=${B}`, `HEAD=${B} DEPLOYED_SHA=${A}`).ok === false &&
+  verifyProtectedSummary(`HEAD=${A}\nDEPLOYED_SHA=${B}`, `HEAD=${B} DEPLOYED_SHA=${A}`).identifierContradictions.length > 0);
 
 // Phase37 — status/subject relations cannot be swapped between subjects.
 const swappedRaw = "JRA=FAIL\nBoat=PASS";
@@ -148,7 +156,8 @@ function compressionCtx(style) {
         const grouped = [...new Set(names)].map((name) => `- ${name}: grouped, successful operations merged.`).join("\n");
         const keep = extractProtectedItems(body).map((item) => `${item.category}: ${item.value}`).join("\n");
         const pairs = [...body.matchAll(/([A-Za-z0-9_.:/-]{2,40})\s*[:=]\s*(FAIL|HOLD|BLOCKED)\b/gi)].map((m) => `${m[1]}: ${m[2]}`);
-        text = `Compressed tool summary\n${grouped}\n${style === "lossy" ? "" : keep + "\n" + pairs.join("\n")}`;
+        const ids = [...body.matchAll(/\b(FINAL_SHA|BASE_SHA|CURRENT_SHA|ACTIVE_SHA|DEPLOYED_SHA|HEAD|BUILD_ID|RELEASE)\s*[=:]\s*([A-Za-z0-9._/-]{2,})/gi)].map((m) => `${m[1].toUpperCase()}=${m[2]}`);
+        text = `Compressed tool summary\n${grouped}\n${style === "lossy" ? "" : keep + "\n" + pairs.join("\n") + "\n" + ids.join("\n")}`;
       }
       const result = { stopReason: "stop", content: [{ type: "text", text }],
         usage: { input: 1000, output: Math.ceil(text.length / 4), cacheRead: 0, cacheWrite: 0, totalTokens: 1000 + Math.ceil(text.length / 4) } };

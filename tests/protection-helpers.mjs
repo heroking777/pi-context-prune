@@ -28,9 +28,10 @@ export function fakeCtx(behaviour, session = "s1") {
       if (behaviour === "429") { const e = new Error("429 Too Many Requests"); e.status = 429; throw e; }
       if (behaviour === "error") throw new Error("provider exploded");
       const pairs = [...body.matchAll(/([A-Za-z0-9_.:/-]{2,40})\s*[:=]\s*(FAIL|HOLD|BLOCKED)\b/gi)].map((m) => `${m[1]}: ${m[2]}`);
+      const ids = [...body.matchAll(/\b(FINAL_SHA|BASE_SHA|CURRENT_SHA|ACTIVE_SHA|DEPLOYED_SHA|HEAD|BUILD_ID|RELEASE)\s*[=:]\s*([A-Za-z0-9._/-]{2,})/gi)].map((m) => `${m[1].toUpperCase()}=${m[2]}`);
       const text = behaviour === "lossy"
         ? "Compressed summary without any identifiers."
-        : extractProtectedItems(body).map((item) => item.value).join("\n") + "\n" + pairs.join("\n");
+        : extractProtectedItems(body).map((item) => item.value).join("\n") + "\n" + pairs.join("\n") + "\n" + ids.join("\n");
       const result = { stopReason: "stop", content: [{ type: "text", text }],
         usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15 }, timestamp: Date.now() };
       if (behaviour === "slow-ok") {

@@ -13,10 +13,14 @@
 // has a machine-readable structure; anything else is reported, never silently
 // passed.
 import { createHash } from "node:crypto";
-import { resolveActiveIdentifiers, checkStatusRelations } from "./summary-protection-semantics.js";
+import { resolveIdentifiers, checkIdentifierRelations, checkStatusRelations, type IdentifierPair } from "./summary-protection-semantics.js";
 
 export type ProtectedCategory =
   | "active-sha"
+  | "final-sha"
+  | "head-sha"
+  | "current-sha"
+  | "deployed-sha"
   | "build-id"
   | "release"
   | "sha"
@@ -168,8 +172,8 @@ export interface ProtectionExtraction {
 
 function collectTier1(rawText: string): { items: ProtectedItem[]; overflowCategories: ProtectedCategory[]; scanned: number; truncated: boolean; ambiguousActive: string[] } {
   const scan = collect(rawText, TIER1_EXTRACTORS, MAX_TIER1_SCAN);
-  const active = resolveActiveIdentifiers(rawText);
-  return { items: [...active.items, ...scan.items], overflowCategories: scan.overflow, scanned: scan.scanned, truncated: scan.truncated, ambiguousActive: active.ambiguous };
+  const identifiers = resolveIdentifiers(rawText);
+  return { items: [...identifiers.items, ...scan.items], overflowCategories: scan.overflow, scanned: scan.scanned, truncated: scan.truncated, ambiguousActive: identifiers.ambiguous };
 }
 
 /**
@@ -213,6 +217,8 @@ export interface ProtectionVerdict {
   relationsChecked: number;
   unresolvedRelations: ProtectedRelation[];
   contradictions: ProtectedRelation[];
+  identifierUnresolved: IdentifierPair[];
+  identifierContradictions: IdentifierPair[];
   /** Semantic content that cannot be verified mechanically (never a pass). */
   unverifiableRelations: number;
   ambiguousActive: string[];
@@ -245,10 +251,12 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
     else advisoryMissing.push(item);
   }
   const relations = checkStatusRelations(rawText, summaryText);
+  const identifiers = checkIdentifierRelations(rawText, summaryText);
   const unresolvedRelations = [...relations.unresolved, ...relations.contradictions];
   return {
     ok: missing.length === 0 && extraction.overflowCategories.length === 0 && !extraction.truncated &&
-      unresolvedRelations.length === 0 && relations.unverifiable === 0,
+      unresolvedRelations.length === 0 && relations.unverifiable === 0 &&
+      identifiers.unresolved.length === 0 && identifiers.contradictions.length === 0,
     checked: extraction.items.length,
     required,
     missing,
@@ -261,6 +269,8 @@ export function verifyProtectedSummary(rawText: string, summaryText: string): Pr
     relationsChecked: unresolvedRelations.length + relations.unverifiable,
     unresolvedRelations,
     contradictions: relations.contradictions,
+    identifierUnresolved: identifiers.unresolved,
+    identifierContradictions: identifiers.contradictions,
     unverifiableRelations: relations.unverifiable,
     ambiguousActive: extraction.ambiguousActive,
   };
@@ -277,6 +287,8 @@ export function protectionRejectionCategories(verdict: ProtectionVerdict): strin
   return [...new Set([
     ...verdict.missing.map((item) => item.category),
     ...(verdict.unresolvedRelations.length > 0 ? ["relation" as const] : []),
+    ...verdict.identifierUnresolved.map((pair) => pair.category),
+    ...verdict.identifierContradictions.map((pair) => pair.category),
     ...verdict.overflow,
   ])].join(", ");
 }

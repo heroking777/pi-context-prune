@@ -1,53 +1,110 @@
 // Phase37: semantics for the protection guard — active-identifier resolution and
 // structured status/subject relations. Type-only import from
 // ./summary-protection.ts keeps this module free of a runtime cycle.
-import type { ProtectedItem, ProtectedRelation } from "./summary-protection.js";
+import type { ProtectedCategory, ProtectedItem, ProtectedRelation, ProtectedTier } from "./summary-protection.js";
 
-// Commit-like labels. BASE_SHA is deliberately excluded: it is a base, never the
-// current revision.
-const COMMIT_LABELS = ["CURRENT_SHA", "ACTIVE_SHA", "DEPLOYED_SHA", "FINAL_SHA", "HEAD"];
-const BUILD_LABELS = ["BUILD_ID"];
-const RELEASE_LABELS = ["RELEASE"];
+// Identifier roles. Each label is a distinct role: values may differ across
+// roles (GitHub HEAD vs VPS DEPLOYED_SHA vs BUILD_ID) without being a conflict.
+// BASE_SHA is a comparison origin, never a current value, so it is tier 2.
+const IDENTIFIER_ROLES: { role: string; label: string; category: ProtectedCategory; tier: ProtectedTier }[] = [
+  { role: "final-sha", label: "FINAL_SHA", category: "final-sha", tier: 1 },
+  { role: "head-sha", label: "HEAD", category: "head-sha", tier: 1 },
+  { role: "current-sha", label: "CURRENT_SHA", category: "current-sha", tier: 1 },
+  { role: "deployed-sha", label: "DEPLOYED_SHA", category: "deployed-sha", tier: 1 },
+  { role: "active-sha", label: "ACTIVE_SHA", category: "active-sha", tier: 1 },
+  { role: "build-id", label: "BUILD_ID", category: "build-id", tier: 1 },
+  { role: "release", label: "RELEASE", category: "release", tier: 1 },
+  { role: "base-sha", label: "BASE_SHA", category: "sha", tier: 2 },
+];
 
-function labeledValues(rawText: string, labels: string[]): Map<string, string[]> {
-  const out = new Map<string, string[]>();
-  for (const label of labels) {
-    const regex = new RegExp(`\\b${label}\\s*[=:]\\s*([A-Za-z0-9._/-]{2,})`, "gi");
-    const values = [...rawText.matchAll(regex)].map((match) => match[1]).filter((value): value is string => typeof value === "string");
-    if (values.length > 0) out.set(label, values);
-  }
-  return out;
+export interface IdentifierPair {
+  role: string;
+  value: string;
+  /** Nearest preceding tool-call subject, or "unknown" when it cannot be told. */
+  subject: string;
+  category: ProtectedCategory;
+  tier: ProtectedTier;
 }
 
-export interface ActiveIdentifiers {
+/** Nearest preceding tool-call subject (path, owner/repo or tool name). */
+function subjectAt(rawText: string, index: number): string {
+  const before = rawText.slice(0, index);
+  const toolIndex = before.lastIndexOf("\nTool:");
+  const line = before.slice(toolIndex + 1).split("\n")[0] ?? "";
+  const path = line.match(/(?:\/[\w.@+-]+)+/);
+  if (path) return path[0];
+  const repo = line.match(/\b[\w.-]+\/[\w.-]+\b/);
+  if (repo) return repo[0];
+  const tool = line.match(/Tool:\s*(\w+)/);
+  return tool ? tool[1] : "unknown";
+}
+
+export interface IdentifierResolution {
   items: ProtectedItem[];
-  /** Identifier classes that have conflicting values (fail closed). */
+  pairs: IdentifierPair[];
+  /** Roles whose same-role/same-subject values disagree (fail closed). */
   ambiguous: string[];
 }
 
 /**
- * Resolves the active commit/build/release identifiers. Commit-like labels that
- * disagree with each other are ambiguous (never guessed); BASE_SHA is not a
- * current value; build and release identifiers are kept as separate classes and
- * are never substituted for one another.
+ * Resolves labelled identifiers per role and subject. Cross-role disagreement is
+ * normal; only the same role with contradictory values (or an unknown subject
+ * with several values) is ambiguous and fails closed.
  */
-export function resolveActiveIdentifiers(rawText: string): ActiveIdentifiers {
-  const items: ProtectedItem[] = [];
-  const ambiguous: string[] = [];
-
-  const commitValues = new Set<string>();
-  for (const values of labeledValues(rawText, COMMIT_LABELS).values()) for (const value of values) commitValues.add(value);
-  if (commitValues.size > 1) ambiguous.push("active-sha");
-  else if (commitValues.size === 1) items.push({ category: "active-sha", value: [...commitValues][0], exact: true, tier: 1 });
-
-  for (const [category, labels] of [["build-id", BUILD_LABELS], ["release", RELEASE_LABELS]] as const) {
-    for (const values of labeledValues(rawText, [...labels]).values()) {
-      const distinct = [...new Set(values)];
-      if (distinct.length > 1) ambiguous.push(category);
-      else if (distinct.length === 1) items.push({ category, value: distinct[0], exact: true, tier: 1 });
+export function resolveIdentifiers(rawText: string): IdentifierResolution {
+  const pairs: IdentifierPair[] = [];
+  for (const spec of IDENTIFIER_ROLES) {
+    const regex = new RegExp(`\\b${spec.label}\\s*[=:]\\s*([A-Za-z0-9._/-]{2,})`, "gi");
+    for (const match of rawText.matchAll(regex)) {
+      const value = match[1];
+      if (typeof value !== "string") continue;
+      pairs.push({ role: spec.role, value, subject: subjectAt(rawText, match.index ?? 0), category: spec.category, tier: spec.tier });
     }
   }
-  return { items, ambiguous };
+  const byKey = new Map<string, Set<string>>();
+  for (const pair of pairs) {
+    const key = `${pair.role}\u0000${pair.subject === "unknown" ? "<unknown>" : pair.subject}`;
+    if (!byKey.has(key)) byKey.set(key, new Set());
+    byKey.get(key)!.add(pair.value);
+  }
+  const ambiguous = new Set<string>();
+  for (const [key, values] of byKey) if (values.size > 1) ambiguous.add(key.split("\u0000")[0]);
+  const seen = new Set<string>();
+  const items: ProtectedItem[] = [];
+  for (const pair of pairs) {
+    const key = `${pair.category}\u0000${pair.value}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    items.push({ category: pair.category, value: pair.value, exact: true, tier: pair.tier });
+  }
+  return { items, pairs, ambiguous: [...ambiguous] };
+}
+
+export interface IdentifierCheck {
+  unresolved: IdentifierPair[];
+  contradictions: IdentifierPair[];
+}
+
+/** Every tier-1 raw identifier must keep its role and value in the summary. */
+export function checkIdentifierRelations(rawText: string, summaryText: string): IdentifierCheck {
+  const rawPairs = resolveIdentifiers(rawText).pairs.filter((pair) => pair.tier === 1);
+  const summaryPairs: IdentifierPair[] = [];
+  for (const spec of IDENTIFIER_ROLES) {
+    if (spec.tier !== 1) continue;
+    const regex = new RegExp(`\\b${spec.label}\\s*[=:]\\s*([A-Za-z0-9._/-]{2,})`, "gi");
+    for (const match of summaryText.matchAll(regex)) {
+      const value = match[1];
+      if (typeof value === "string") summaryPairs.push({ role: spec.role, value, subject: "summary", category: spec.category, tier: 1 });
+    }
+  }
+  const unresolved: IdentifierPair[] = [];
+  const contradictions: IdentifierPair[] = [];
+  for (const pair of rawPairs) {
+    if (summaryPairs.some((candidate) => candidate.role === pair.role && candidate.value === pair.value)) continue;
+    const sameRole = summaryPairs.some((candidate) => candidate.role === pair.role);
+    (sameRole ? contradictions : unresolved).push(pair);
+  }
+  return { unresolved, contradictions };
 }
 
 const STATUS_WORD = /\b(FAIL|HOLD|BLOCKED)\b/gi;
