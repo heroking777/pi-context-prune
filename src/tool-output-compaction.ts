@@ -139,9 +139,10 @@ export function compactToolOutput(event: ToolResultEvent): OutputCompaction | nu
 }
 
 function currentTurnIndex(ctx: ExtensionContext): number {
-  return ctx.sessionManager.getBranch().filter((entry: any) =>
+  const assistantMessages = ctx.sessionManager.getBranch().filter((entry: any) =>
     entry.type === "message" && entry.message?.role === "assistant",
   ).length;
+  return Math.max(0, assistantMessages - 1);
 }
 
 function detailsWithMarker(details: unknown, marker: string, metadata: Record<string, unknown>): Record<string, unknown> {
