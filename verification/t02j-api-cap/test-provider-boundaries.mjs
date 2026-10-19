@@ -39,6 +39,7 @@ function runTransport(transport) {
   const events = readJsonl(join(stateDir, "events.jsonl"));
   const provider = readJsonl(join(stateDir, "provider-path.jsonl"))[0];
   const constructors = readJsonl(join(stateDir, "websocket-constructor.jsonl"));
+  const diagnostics = readJsonl(join(stateDir, "diagnostics.jsonl"));
   const payload = readJsonl(join(stateDir, "payload.jsonl"))[0];
   assert.deepEqual({ used: state.used, attempts: state.attempts, dryRunBlocks: state.dryRunBlocks },
     { used: 0, attempts: 1, dryRunBlocks: 1 });
@@ -48,6 +49,10 @@ function runTransport(transport) {
   assert.equal(provider.resolvedWebSocketConstructorWrapped, true);
   assert.equal(provider.responseCreateSendGuarded, true);
   assert.equal(provider.fetchRedirectedToGuard, true);
+  const snapshot = diagnostics.find((entry) => entry.event === "sandbox-snapshot");
+  assert.ok(snapshot, "sandbox snapshot must be captured at preload startup");
+  assert.equal(snapshot.fetch.node, process.version);
+  assert.equal(snapshot.provider.module, "openai-codex-responses.js");
   assert.ok(constructors.some((entry) => entry.forcedOfflineFake && entry.selectedConstructor === "OfflineWebSocket"));
   assert.equal(payload.querySchemaPresent, true);
 

@@ -15,6 +15,7 @@ import { createFakeWebSocket } from "./fake-websocket.mjs";
 import { rejectOAuthRefresh } from "./oauth-refresh-guard.mjs";
 import { patchCodexProvider, sendResponseCreate } from "./provider-transport-guard.mjs";
 import { createWebSocketWrapper } from "./websocket-cap.mjs";
+import { createDiagnostics, recordSandboxSnapshot, recordWebSocket } from "./transport-diagnostics.mjs";
 
 const require = createRequire(import.meta.url);
 const websocketWrappers = new WeakMap();
@@ -160,7 +161,8 @@ export function wrapFetch(originalFetch, budget, onBlocked = () => {}) {
         throw error;
       }
     }
-    return originalFetch.call(globalThis, input, options);
+    const diagnostics = createDiagnostics(join(budget.directory, "diagnostics.jsonl"), { transport: "fetch" });
+    return diagnostics.fetch((request, init) => originalFetch.call(globalThis, request, init), input, options);
   };
 }
 
@@ -189,6 +191,11 @@ export function installApiSendCap(environment = process.env) {
   const directory = environment.PI_API_SEND_CAP_DIR;
   const dryRun = environment.PI_API_SEND_CAP_DRY_RUN !== "0";
   const budget = createBudget(directory, dryRun);
+  recordSandboxSnapshot(join(directory, "diagnostics.jsonl"), {
+    harnessPath: new URL("./api-send-cap.mjs", import.meta.url).pathname,
+    providerPath: environment.PI_AI_PROVIDER_MODULE,
+    env: environment,
+  });
   globalThis.__PI_API_SEND_CAP_PROVIDER_VERIFIED = false;
   const testExit = environment.PI_API_SEND_CAP_TEST_EXIT_AFTER_BLOCK === "1";
   const onBlocked = (error) => {
@@ -209,6 +216,7 @@ export function installApiSendCap(environment = process.env) {
       blockExternalInDryRun: !fakeWebSocket,
       requireVerifiedProvider: true,
       reserveBeforeHandshake: !fakeWebSocket,
+      recordDiagnostic: (requestId, event) => recordWebSocket(join(directory, "diagnostics.jsonl"), requestId, event),
       onBlocked,
     });
     appendFileSync(join(directory, "websocket-constructor.jsonl"), `${JSON.stringify({

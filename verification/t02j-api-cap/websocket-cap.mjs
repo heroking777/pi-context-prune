@@ -41,9 +41,12 @@ function createCappedWebSocket(Base, budget, options) {
         throw new Error("WebSocket handshake blocked in dry-run");
       }
       const pending = external && reserveBeforeHandshake;
+      const requestId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+      const record = options.recordDiagnostic ?? (() => {});
       if (pending) {
         try {
           budget.reserve("websocket.handshake", target);
+          record(requestId, "handshake-reserved");
         } catch (error) {
           onBlocked(error, target);
           throw error;
@@ -51,7 +54,11 @@ function createCappedWebSocket(Base, budget, options) {
       }
       super(url, protocols);
       this.__piApiSendCapTarget = target;
+      this.__piApiSendCapRequestId = requestId;
       this.__piApiSendCapReservationPending = pending;
+      for (const event of ["open", "error", "close"]) {
+        this.addEventListener?.(event, () => record(requestId, event));
+      }
     }
 
     [RESERVATION_CONSUMER]() {
