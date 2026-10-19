@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import {
   appendFileSync,
   closeSync,
@@ -15,7 +16,7 @@ import { createFakeWebSocket } from "./fake-websocket.mjs";
 import { rejectOAuthRefresh } from "./oauth-refresh-guard.mjs";
 import { patchCodexProvider, sendResponseCreate } from "./provider-transport-guard.mjs";
 import { createWebSocketWrapper } from "./websocket-cap.mjs";
-import { createDiagnostics, recordSandboxSnapshot, recordWebSocket } from "./transport-diagnostics.mjs";
+import { createDiagnostics, recordOperationEvent, recordSandboxSnapshot, recordWebSocket } from "./transport-diagnostics.mjs";
 
 const require = createRequire(import.meta.url);
 const websocketWrappers = new WeakMap();
@@ -150,7 +151,7 @@ function httpTarget(input, options, defaultProtocol) {
 }
 
 export function wrapFetch(originalFetch, budget, onBlocked = () => {}) {
-  return async function cappedFetch(input, options = {}) {
+  return async function cappedFetch(input, options = {}, context = {}) {
     const url = input?.url ?? input;
     rejectOAuthRefresh(url, budget, onBlocked);
     if (isExternalUrl(url)) {
@@ -161,7 +162,12 @@ export function wrapFetch(originalFetch, budget, onBlocked = () => {}) {
         throw error;
       }
     }
-    const diagnostics = createDiagnostics(join(budget.directory, "diagnostics.jsonl"), { transport: "fetch" });
+    const diagnostics = createDiagnostics(join(budget.directory, "diagnostics.jsonl"), {
+      transport: context.transport ?? "fetch",
+      operationId: context.operationId,
+      retryAttempt: context.retryAttempt,
+      requestId: context.requestId ?? randomUUID(),
+    });
     return diagnostics.fetch((request, init) => originalFetch.call(globalThis, request, init), input, options);
   };
 }
@@ -204,19 +210,24 @@ export function installApiSendCap(environment = process.env) {
   };
   const nativeFetch = globalThis.fetch;
   if (typeof nativeFetch !== "function") throw new Error("fetch unavailable; refusing unguarded run");
-  const guardedFetch = wrapFetch(nativeFetch, budget, onBlocked);
+  const fetchTransport = environment.PI_API_SEND_CAP_FAKE_FETCH === "1"
+    ? async () => { throw Object.assign(new Error("synthetic fetch failure"), { code: "EFakeTransport" }); }
+    : nativeFetch;
+  const guardedFetch = wrapFetch(fetchTransport, budget, onBlocked);
   const fakeWebSocket = environment.PI_API_SEND_CAP_FAKE_WEBSOCKET === "1"
     ? createFakeWebSocket(join(directory, "fake-websocket.jsonl"))
     : undefined;
   const nativeWebSocket = fakeWebSocket ?? globalThis.WebSocket;
   if (typeof nativeWebSocket !== "function") throw new Error("WebSocket unavailable; refusing unguarded run");
-  const wrapResolvedWebSocket = (Base) => {
+  const wrapResolvedWebSocket = (Base, operationId, requestId) => {
     const selectedBase = fakeWebSocket ?? Base;
     const guarded = wrapWebSocket(selectedBase, budget, {
       blockExternalInDryRun: !fakeWebSocket,
       requireVerifiedProvider: true,
       reserveBeforeHandshake: !fakeWebSocket,
-      recordDiagnostic: (requestId, event) => recordWebSocket(join(directory, "diagnostics.jsonl"), requestId, event),
+      operationId,
+      requestId,
+      recordDiagnostic: (requestId, event, opId, error) => recordWebSocket(join(directory, "diagnostics.jsonl"), requestId, event, undefined, opId, error),
       onBlocked,
     });
     appendFileSync(join(directory, "websocket-constructor.jsonl"), `${JSON.stringify({
@@ -227,6 +238,29 @@ export function installApiSendCap(environment = process.env) {
     return guarded;
   };
   globalThis.__PI_API_SEND_CAP_FETCH = guardedFetch;
+  globalThis.__PI_API_SEND_CAP_BEGIN_OPERATION = () => {
+    const operationId = randomUUID();
+    recordOperationEvent(join(directory, "diagnostics.jsonl"), operationId, "operation-start");
+    return operationId;
+  };
+  globalThis.__PI_API_SEND_CAP_EVENT = (operationId, event, details) =>
+    recordOperationEvent(join(directory, "diagnostics.jsonl"), operationId, event, details);
+  globalThis.__PI_API_SEND_CAP_WS_ATTEMPT = (operationId) => {
+    const requestId = randomUUID();
+    recordOperationEvent(join(directory, "diagnostics.jsonl"), operationId, "websocket-attempt-start", {
+      requestId, transport: "websocket",
+    });
+    return requestId;
+  };
+  globalThis.__PI_API_SEND_CAP_FETCH_FOR_ATTEMPT = (operationId, attempt) => {
+    const requestId = randomUUID();
+    recordOperationEvent(join(directory, "diagnostics.jsonl"), operationId, "fetch-request", {
+      requestId, retry_attempt: attempt + 1, retry: attempt > 0, transport: "sse",
+    });
+    return (input, options) => guardedFetch(input, options, {
+      operationId, retryAttempt: attempt + 1, requestId, transport: "sse",
+    });
+  };
   globalThis.__PI_API_SEND_CAP_WRAP_WEBSOCKET = wrapResolvedWebSocket;
   globalThis.__PI_API_SEND_CAP_RESPONSE_CREATE = (socket, payload, target) =>
     sendResponseCreate(socket, payload, target, budget, onBlocked);

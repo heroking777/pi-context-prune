@@ -27,6 +27,7 @@ mkdir -m 700 -p "$PI_API_SEND_CAP_TEST_DIR"
 for file in "$script_dir"/*.mjs; do node --check "$file"; done
 node "$script_dir/test-api-send-cap.mjs"
 node "$script_dir/test-transport-diagnostics.mjs"
+node "$script_dir/test-provider-fallback-correlation.mjs"
 node "$script_dir/test-provider-source-patch.mjs"
 node "$script_dir/test-oauth-refresh-flow.mjs"
 node "$script_dir/test-oauth-refresh-guard.mjs"

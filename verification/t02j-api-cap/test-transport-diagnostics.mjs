@@ -19,13 +19,17 @@ for (const [i, error] of classes.entries()) {
 }
 const missing = createDiagnostics(log, { transport: "fetch", requestId: "missing" });
 await assert.rejects(missing.fetch(async () => { throw new Error("plain safe failure"); }, "https://x.invalid"));
-for (const event of ["handshake-reserved", "open", "error", "close", "fetch-fallback"]) recordWebSocket(log, "ws-1", event);
+let failedLogTransportCalls = 0;
+const unavailable = createDiagnostics(join(dir, "absent", "diagnostics.jsonl"), { transport: "fetch" });
+await assert.rejects(unavailable.fetch(async () => { failedLogTransportCalls++; throw new Error("offline"); }, "https://x.invalid"), /diagnostics unavailable/);
+assert.equal(failedLogTransportCalls, 1, "diagnostic write failure must stop the request path");
+for (const event of ["handshake-reserved", "open", "error", "close"]) recordWebSocket(log, "ws-1", event);
 const lines = readFileSync(log, "utf8").trim().split("\n").map(JSON.parse);
 assert.equal(lines.filter((x) => x.event === "fetch-error").length, 5);
 assert.equal(lines[0].error.code, "ENOTFOUND");
 assert.equal(lines[0].error.cause.code, "EINNER");
 assert.equal(lines[4].error.cause, "MISSING");
-assert.deepEqual(lines.slice(-5).map((x) => x.event), ["handshake-reserved", "open", "error", "close", "fetch-fallback"]);
+assert.deepEqual(lines.slice(-4).map((x) => x.event), ["handshake-reserved", "open", "error", "close"]);
 const serialized = JSON.stringify(lines);
 for (const secret of ["secret-value", "private.invalid", "token=secret", "Bearer secret"]) assert.equal(serialized.includes(secret), false);
 assert.equal(lines[0].requestId, "req-0");

@@ -35,7 +35,7 @@ function errorFields(error, depth = 0) {
   return result;
 }
 
-export function createDiagnostics(logPath, { transport, requestId = randomUUID(), now = () => new Date().toISOString() }) {
+export function createDiagnostics(logPath, { transport, operationId = "UNKNOWN", retryAttempt = 1, requestId = randomUUID(), now = () => new Date().toISOString() }) {
   return {
     requestId,
     async fetch(fetchImpl, input, init) {
@@ -46,6 +46,8 @@ export function createDiagnostics(logPath, { transport, requestId = randomUUID()
           event: "fetch-error",
           transport,
           requestId,
+          operationId,
+          retryAttempt,
           at: now(),
           error: errorFields(error),
         };
@@ -60,9 +62,15 @@ export function createDiagnostics(logPath, { transport, requestId = randomUUID()
   };
 }
 
-export function recordWebSocket(logPath, requestId, event, at = new Date().toISOString()) {
-  if (!["handshake-reserved", "open", "error", "close", "fetch-fallback"].includes(event)) throw new Error("Invalid WebSocket diagnostic event");
-  appendFileSync(logPath, `${JSON.stringify({ event, requestId, at })}\n`, { mode: 0o600 });
+export function recordWebSocket(logPath, requestId, event, at = new Date().toISOString(), operationId = "UNKNOWN", error = undefined) {
+  if (!["websocket-attempt-start", "handshake-reserved", "constructor-attempt", "constructor-failure", "open", "error", "close"].includes(event)) throw new Error("Invalid WebSocket diagnostic event");
+  appendFileSync(logPath, `${JSON.stringify({ event, requestId, operationId, transport: "websocket", at, ...(["error", "constructor-failure"].includes(event) ? { error: errorFields(error) } : {}) })}\n`, { mode: 0o600 });
+}
+
+export function recordOperationEvent(logPath, operationId, event, details = {}) {
+  const allowed = ["operation-start", "sse-fallback-selected", "fetch-attempt", "fetch-request", "websocket-attempt-start"];
+  if (!allowed.includes(event)) throw new Error("Invalid operation diagnostic event");
+  appendFileSync(logPath, `${JSON.stringify({ event, operationId, ...details, at: new Date().toISOString() })}\n`, { mode: 0o600 });
 }
 
 export function sandboxSnapshot({ harnessPath, providerPath, env = process.env, fs = undefined }) {

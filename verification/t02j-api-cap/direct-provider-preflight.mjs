@@ -39,7 +39,7 @@ const testClaims = Buffer.from(JSON.stringify({
 const options = {
   apiKey: `${testHeader}.${testClaims}.offline`,
   transport: process.env.PI_API_SEND_CAP_TEST_TRANSPORT ?? "auto",
-  maxRetries: 0,
+  maxRetries: Number(process.env.PI_API_SEND_CAP_TEST_MAX_RETRIES ?? 0),
   websocketConnectTimeoutMs: 100,
   onPayload(payload) {
     if (output) {
@@ -56,6 +56,10 @@ const options = {
   },
 };
 
-for await (const _event of streamSimple(model, context, options)) {
-  // The dry-run preloader exits at the guarded boundary before any transport.
+const resultEvents = [];
+for await (const event of streamSimple(model, context, options)) {
+  resultEvents.push(event?.type ?? "unknown");
+}
+if (process.env.PI_API_SEND_CAP_PROVIDER_RESULT) {
+  appendFileSync(process.env.PI_API_SEND_CAP_PROVIDER_RESULT, `${JSON.stringify({ events: resultEvents })}\n`);
 }

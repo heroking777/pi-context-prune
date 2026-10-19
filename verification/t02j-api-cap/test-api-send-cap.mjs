@@ -222,6 +222,10 @@ function testMissingCounterStateFailsClosed() {
 function testProviderSourceDriftFailsClosed() {
   const budget = createBudget(freshDir("source-drift"), true);
   globalThis.__PI_API_SEND_CAP_FETCH = () => {};
+  globalThis.__PI_API_SEND_CAP_FETCH_FOR_ATTEMPT = () => {};
+  globalThis.__PI_API_SEND_CAP_BEGIN_OPERATION = () => "test-operation";
+  globalThis.__PI_API_SEND_CAP_WS_ATTEMPT = () => "test-websocket-request";
+  globalThis.__PI_API_SEND_CAP_EVENT = () => {};
   globalThis.__PI_API_SEND_CAP_WRAP_WEBSOCKET = () => FakeWebSocket;
   globalThis.__PI_API_SEND_CAP_RESPONSE_CREATE = () => {};
   globalThis.__PI_API_SEND_CAP_PROVIDER_VERIFIED = false;

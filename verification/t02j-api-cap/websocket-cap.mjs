@@ -23,6 +23,8 @@ function createCappedWebSocket(Base, budget, options) {
   const blockExternalInDryRun = options.blockExternalInDryRun ?? true;
   const requireVerifiedProvider = options.requireVerifiedProvider ?? true;
   const reserveBeforeHandshake = options.reserveBeforeHandshake ?? true;
+  const operationId = options.operationId ?? "UNKNOWN";
+  const requestId = options.requestId ?? globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
   const onBlocked = options.onBlocked ?? (() => {});
   return class CappedWebSocket extends Base {
     constructor(url, protocols) {
@@ -41,23 +43,28 @@ function createCappedWebSocket(Base, budget, options) {
         throw new Error("WebSocket handshake blocked in dry-run");
       }
       const pending = external && reserveBeforeHandshake;
-      const requestId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
       const record = options.recordDiagnostic ?? (() => {});
       if (pending) {
         try {
           budget.reserve("websocket.handshake", target);
-          record(requestId, "handshake-reserved");
+          record(requestId, "handshake-reserved", operationId);
         } catch (error) {
           onBlocked(error, target);
           throw error;
         }
       }
-      super(url, protocols);
+      record(requestId, "constructor-attempt", operationId);
+      try {
+        super(url, protocols);
+      } catch (error) {
+        record(requestId, "constructor-failure", operationId, error);
+        throw error;
+      }
       this.__piApiSendCapTarget = target;
       this.__piApiSendCapRequestId = requestId;
       this.__piApiSendCapReservationPending = pending;
       for (const event of ["open", "error", "close"]) {
-        this.addEventListener?.(event, () => record(requestId, event));
+        this.addEventListener?.(event, (detail) => record(requestId, event, operationId, detail?.error));
       }
     }
 
@@ -85,6 +92,7 @@ function createCappedWebSocket(Base, budget, options) {
 }
 
 export function createWebSocketWrapper(Base, budget, options, websocketWrappers, wrapperBudgets) {
+  if (options.operationId) return createCappedWebSocket(Base, budget, options);
   if (wrapperBudgets.get(Base) === budget) return Base;
   let byBudget = websocketWrappers.get(Base);
   if (!byBudget) {
